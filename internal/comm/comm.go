@@ -3,6 +3,8 @@ package comm
 import (
 	"encoding/json"
 	"time"
+
+	"github.com/avvvet/bingo-services/internal/gamesvc/models"
 )
 
 type WSMessage struct {
@@ -56,4 +58,9 @@ type PlayerData struct {
 	Name    string `json:"name"`
 	UserId  int64  `json:"user_id"`
 	Balance string `json:"balance"`
+}
+
+type GameData struct {
+	Game    models.Game          `json:"game"`
+	Players []*models.GamePlayer `json:"players"`
 }

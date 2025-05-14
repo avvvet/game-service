@@ -13,16 +13,20 @@ import (
 )
 
 type Broker struct {
-	Conn           *nats.Conn
-	UserService    *service.UserService
-	BalanceService *service.BalanceService
+	Conn              *nats.Conn
+	UserService       *service.UserService
+	BalanceService    *service.BalanceService
+	GameService       *service.GameService
+	GamePlayerService *service.GamePlayerService
 }
 
-func NewBroker(nc *nats.Conn, userService *service.UserService, balanceService *service.BalanceService) *Broker {
+func NewBroker(nc *nats.Conn, userService *service.UserService, balanceService *service.BalanceService, gameService *service.GameService, gamePlayerService *service.GamePlayerService) *Broker {
 	return &Broker{
-		Conn:           nc,
-		UserService:    userService,
-		BalanceService: balanceService,
+		Conn:              nc,
+		UserService:       userService,
+		BalanceService:    balanceService,
+		GameService:       gameService,
+		GamePlayerService: gamePlayerService,
 	}
 }
 
@@ -46,7 +50,7 @@ func (b *Broker) handleMessage(msgNat *nats.Msg) {
 
 		user, err := b.UserService.GetOrCreateUser(userInfo)
 		if err != nil {
-			log.Errorf("Error [BalanceService.GetUserBalance] %s", err)
+			log.Errorf("Error [UserService.GetOrCreateUser] %s", err)
 		}
 
 		// get user balance
@@ -66,6 +70,84 @@ func (b *Broker) handleMessage(msgNat *nats.Msg) {
 		// publish to socket service
 		//balance := decimal.NewFromFloat(40000.34)
 		b.PublishInitResponse(playerData, msg.SocketId)
+	case "get-wait-game":
+		var request struct {
+			UserId int64 `json:"user_id"`
+			Gtype  int   `json:"gtype"`
+		}
+
+		err := json.Unmarshal(msg.Data, &request)
+		if err != nil {
+			log.Errorf("Error %s", err)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		//get a game for game type
+		game, err := b.GameService.GetGameByTypeAndStatus(ctx, request.Gtype, "waiting")
+		if err != nil {
+			log.Errorf("Error [UserService.GetOrCreateUser] %s", err)
+		}
+
+		//get a game for game type
+		players, err := b.GamePlayerService.GetGamePlayers(ctx, int(game.ID))
+		if err != nil {
+			log.Errorf("Error [UserService.GetOrCreateUser] %s", err)
+		}
+
+		gameData := comm.GameData{
+			Game:    *game,
+			Players: players,
+		}
+
+		b.PublishWaitGameResponse(gameData, msg.SocketId)
+	case "player-select-card":
+		var request struct {
+			UserId int64  `json:"user_id"`
+			GameId int    `json:"game_id"`
+			CardSN string `json:"card_sn"`
+			Gtype  int    `json:"gtype"`
+		}
+
+		err := json.Unmarshal(msg.Data, &request)
+		if err != nil {
+			log.Errorf("Error %s", err)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		//create game player if card is available
+		gamePlayer, err := b.GamePlayerService.CreateGamePlayerIfAvailable(ctx, request.GameId, request.UserId, request.CardSN)
+		if err != nil {
+			log.Errorf("Error [GamePlayerService.CreateGamePlayerIfAvailable] %s", err)
+			return
+		}
+
+		if gamePlayer == nil {
+			return
+		}
+
+		// lets send new data
+
+		//get a game for game type
+		game, err := b.GameService.GetGameByTypeAndStatus(ctx, request.Gtype, "waiting")
+		if err != nil {
+			log.Errorf("Error [UserService.GetOrCreateUser] %s", err)
+		}
+
+		//get a game for game type
+		players, err := b.GamePlayerService.GetGamePlayers(ctx, int(request.GameId))
+		if err != nil {
+			log.Errorf("Error [UserService.GetOrCreateUser] %s", err)
+		}
+
+		gameData := comm.GameData{
+			Game:    *game,
+			Players: players,
+		}
+		b.PublishWaitGameResponse(gameData, msg.SocketId)
 	default:
 		log.Error("Unknown message")
 		return
@@ -80,6 +162,27 @@ func (b *Broker) PublishInitResponse(p comm.PlayerData, socketId string) {
 
 	msg := &comm.WSMessage{
 		Type:     "init-response",
+		Data:     data,
+		SocketId: socketId,
+	}
+
+	payload, err := json.Marshal(msg)
+	if err != nil {
+		log.Errorf("Error %s", err)
+	}
+
+	topic := "game.service"
+	b.Publish(topic, payload)
+}
+
+func (b *Broker) PublishWaitGameResponse(gdata comm.GameData, socketId string) {
+	data, err := json.Marshal(gdata)
+	if err != nil {
+		log.Errorf("error [PublishWaitGameResponse] unable to marsahl game data %d %s", gdata.Game.ID, socketId)
+	}
+
+	msg := &comm.WSMessage{
+		Type:     "get-wait-game-response",
 		Data:     data,
 		SocketId: socketId,
 	}

@@ -26,6 +26,7 @@ require (
 require (
 	github.com/goccy/go-json v0.3.5 // indirect
 	github.com/golang/snappy v0.0.4 // indirect
+	github.com/jackc/pgx v3.6.2+incompatible
 	github.com/jackc/pgx/v5 v5.7.4
 	github.com/klauspost/compress v1.18.0 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.10 // indirect

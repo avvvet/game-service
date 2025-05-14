@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS games;
+DROP SEQUENCE IF EXISTS game_no_seq;

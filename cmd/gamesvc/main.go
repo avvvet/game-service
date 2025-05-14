@@ -48,6 +48,12 @@ func main() {
 	balanceStore := store.NewBalanceStore(dbpool)
 	balanceService := service.NewBalanceService(balanceStore)
 
+	gameStore := store.NewGameStore(dbpool)
+	gameService := service.NewGameService(gameStore)
+
+	gamePlayerStore := store.NewGamePlayerStore(dbpool)
+	gamePlayerService := service.NewGamePlayerService(gamePlayerStore)
+
 	// Connect to NATS
 	n, err := nats.Connect()
 	if err != nil {
@@ -59,7 +65,8 @@ func main() {
 	log.Printf("NATS connection established successfully %s", n.Url)
 
 	// init peer message broker
-	broker := broker.NewBroker(n.Conn, userService, balanceService)
+	broker := broker.NewBroker(n.Conn,
+		userService, balanceService, gameService, gamePlayerService)
 
 	// subscribe to socket service
 	topic := "socket.service"

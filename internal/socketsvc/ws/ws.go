@@ -25,11 +25,96 @@ func (s *Ws) SocketMessage(socketId string, message *comm.WSMessage) {
 	switch message.Type {
 	case "init":
 		s.handleInit(socketId, message)
-	case "offer":
-
+	case "get-wait-game":
+		s.getWaitGame(socketId, message)
+	case "player-select-card":
+		s.selectCard(socketId, message)
 	default:
 		log.Warnf("unknown event received: %s", message.Type)
 	}
+}
+
+func (s *Ws) selectCard(socketId string, msg *comm.WSMessage) {
+	var payload struct {
+		UserId int64  `json:"user_id"`
+		GameId int    `json:"game_id"`
+		CardSN string `json:"card_sn"`
+		Gtype  int    `json:"gtype"`
+	}
+
+	if err := json.Unmarshal(msg.Data, &payload); err != nil {
+		log.Errorf("Error: invalid selectCard payload %s", err)
+		return
+	}
+
+	if msg.Type != "player-select-card" {
+		log.Errorf("Invalid message type for [selectCard] handler: %s", msg.Type)
+		return
+	}
+
+	if payload.UserId == 0 {
+		log.Error("Invalid [selectCard] payload: missing required user fields")
+		return
+	}
+
+	msg.SocketId = socketId
+
+	// Marshal message for NATS
+	bytes, err := json.Marshal(msg)
+	if err != nil {
+		log.Errorf("Failed to marshal WSMessage for NATS: %v", err)
+		return
+	}
+
+	// Publish to game service
+	topic := "socket.service"
+	if err := s.Broker.Publish(topic, bytes); err != nil {
+		log.Errorf("Failed to publish to NATS topic %s: %v", topic, err)
+		return
+	}
+
+	log.Infof("Published [selectCard] message for user %d to topic %s", payload.UserId, topic)
+}
+
+func (s *Ws) getWaitGame(socketId string, msg *comm.WSMessage) {
+	var payload struct {
+		UserId int64 `json:"user_id"`
+		Gtype  int   `json:"gtype"`
+	}
+
+	if err := json.Unmarshal(msg.Data, &payload); err != nil {
+		log.Errorf("Error: invalid_get_wait_game payload %s", err)
+		return
+	}
+
+	if msg.Type != "get-wait-game" {
+		log.Errorf("Invalid message type for get_wait_game handler: %s", msg.Type)
+		return
+	}
+
+	if payload.UserId == 0 {
+		log.Error("Invalid get_wait_game payload: missing required user fields")
+		return
+	}
+
+	// Update message with socket ID
+	msg.SocketId = socketId
+
+	// Marshal message for NATS
+	bytes, err := json.Marshal(msg)
+	if err != nil {
+		log.Errorf("Failed to marshal WSMessage for NATS: %v", err)
+		return
+	}
+
+	// Publish to game service
+	topic := "socket.service"
+	if err := s.Broker.Publish(topic, bytes); err != nil {
+		log.Errorf("Failed to publish to NATS topic %s: %v", topic, err)
+		return
+	}
+
+	log.Infof("Published get_wait_game message for user %d to topic %s", payload.UserId, topic)
 }
 
 func (s *Ws) handleInit(socketId string, msg *comm.WSMessage) {
