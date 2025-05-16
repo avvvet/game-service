@@ -63,4 +63,10 @@ type PlayerData struct {
 type GameData struct {
 	Game    models.Game          `json:"game"`
 	Players []*models.GamePlayer `json:"players"`
+	Gtype   int                  `json:"gtype"`
+}
+
+type GameCard struct {
+	CardSN string `json:"card_sn"` // Unique serial number
+	Data   string `json:"data"`
 }

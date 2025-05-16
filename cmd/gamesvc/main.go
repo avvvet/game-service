@@ -54,6 +54,9 @@ func main() {
 	gamePlayerStore := store.NewGamePlayerStore(dbpool)
 	gamePlayerService := service.NewGamePlayerService(gamePlayerStore)
 
+	cardStore := store.NewCardStore(dbpool)
+	cardService := service.NewCardService(cardStore)
+
 	// Connect to NATS
 	n, err := nats.Connect()
 	if err != nil {
@@ -66,7 +69,7 @@ func main() {
 
 	// init peer message broker
 	broker := broker.NewBroker(n.Conn,
-		userService, balanceService, gameService, gamePlayerService)
+		userService, balanceService, gameService, gamePlayerService, cardService)
 
 	// subscribe to socket service
 	topic := "socket.service"

@@ -2,6 +2,7 @@ package broker
 
 import (
 	"encoding/json"
+	"fmt"
 	"sync"
 	"time"
 
@@ -23,6 +24,9 @@ type Broker struct {
 
 	LastHeartbeatMap   sync.Map // Map to store the last heartbeat timestamp
 	heartbeatThreshold time.Duration
+
+	GameRooms map[int][]string // Gtype -> slice of clients
+	Mu        sync.RWMutex
 }
 
 func NewBroker(conn *nats.Conn, fncGetConnection func(string) (*websocket.Conn, bool), fncGetRoomSockets func(string) ([]string, bool)) *Broker {
@@ -31,6 +35,8 @@ func NewBroker(conn *nats.Conn, fncGetConnection func(string) (*websocket.Conn, 
 		GetConnection:      fncGetConnection,
 		GetRoomSockets:     fncGetRoomSockets,
 		heartbeatThreshold: time.Second * 15,
+
+		GameRooms: make(map[int][]string),
 	}
 }
 
@@ -74,8 +80,10 @@ func (b *Broker) handleMessages(msgNats *nats.Msg) {
 	}
 
 	switch message.Type {
-	case "init-response", "get-wait-game-response":
+	case "init-response", "get-wait-game-response", "player-select-card-response":
 		b.sendMessage(message)
+	case "get-wait-game-response-broadcast":
+		b.sendMessageGroup(message)
 	default:
 		log.Error("Unknown message")
 		return
@@ -90,4 +98,27 @@ func (b *Broker) sendMessage(m *comm.WSMessage) {
 			log.Println(err)
 		}
 	}
+}
+
+// send message to group
+func (b *Broker) sendMessageGroup(m *comm.WSMessage) {
+	var payload struct {
+		Gtype int `json:"gtype"`
+	}
+
+	if err := json.Unmarshal(m.Data, &payload); err != nil {
+		fmt.Println("error-----")
+	}
+
+	s, exists := b.GameRooms[payload.Gtype]
+	if exists {
+		for _, socketId := range s {
+			if conn, ok := b.GetConnection(socketId); ok {
+				if err := conn.WriteJSON(m); err != nil {
+					log.Println(err)
+				}
+			}
+		}
+	}
+
 }

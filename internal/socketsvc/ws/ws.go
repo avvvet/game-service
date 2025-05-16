@@ -2,6 +2,7 @@ package ws
 
 import (
 	"encoding/json"
+	"fmt"
 	"sync"
 
 	"github.com/avvvet/bingo-services/internal/comm"
@@ -95,6 +96,17 @@ func (s *Ws) getWaitGame(socketId string, msg *comm.WSMessage) {
 	if payload.UserId == 0 {
 		log.Error("Invalid get_wait_game payload: missing required user fields")
 		return
+	}
+
+	// for socket grouping per game type
+	s.Broker.Mu.Lock()
+	s.Broker.GameRooms[payload.Gtype] = append(s.Broker.GameRooms[payload.Gtype], socketId)
+	s.Broker.Mu.Unlock()
+
+	so := s.Broker.GameRooms
+
+	for a, b := range so {
+		fmt.Printf("game type %d  count socket %d", a, len(b))
 	}
 
 	// Update message with socket ID
