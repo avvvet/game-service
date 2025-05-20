@@ -82,7 +82,7 @@ func (b *Broker) handleMessages(msgNats *nats.Msg) {
 	switch message.Type {
 	case "init-response", "get-wait-game-response", "player-select-card-response":
 		b.sendMessage(message)
-	case "get-wait-game-response-broadcast":
+	case "get-wait-game-response-broadcast", "game-started":
 		b.sendMessageGroup(message)
 	default:
 		log.Error("Unknown message")

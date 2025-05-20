@@ -70,3 +70,7 @@ type GameCard struct {
 	CardSN string `json:"card_sn"` // Unique serial number
 	Data   string `json:"data"`
 }
+
+type GameType struct {
+	Gtype int `json:"gtype"`
+}

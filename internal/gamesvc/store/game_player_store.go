@@ -69,28 +69,36 @@ func (s *GamePlayerStore) CreateGamePlayerIfAvailable(ctx context.Context, gameI
 		return nil, fmt.Errorf("card serial number cannot be empty")
 	}
 
-	// SQL query to insert a GamePlayer
-	query := `
-        INSERT INTO game_players (game_id, user_id, card_sn, status)
-        VALUES ($1, $2, $3, 'pending')
-        RETURNING id, game_id, user_id, card_sn, status, created_at, updated_at`
-
-	// Initialize the GamePlayer model
-	gamePlayer := &models.GamePlayer{}
-
-	// Execute the query and scan the result
+	// CTE locks the game row and enforces status='waiting'
+	const query = `
+WITH locked_game AS (
+  SELECT id
+  FROM games
+  WHERE id = $1
+    AND status = 'waiting'
+  FOR UPDATE
+)
+INSERT INTO game_players (game_id, user_id, card_sn, status)
+SELECT lg.id, $2, $3, 'pending'
+FROM locked_game lg
+RETURNING id, game_id, user_id, card_sn, status, created_at, updated_at;
+`
+	gp := &models.GamePlayer{}
 	err := s.db.QueryRow(ctx, query, gameID, userID, cardSN).Scan(
-		&gamePlayer.ID,
-		&gamePlayer.GameID,
-		&gamePlayer.UserID,
-		&gamePlayer.CardSN,
-		&gamePlayer.Status,
-		&gamePlayer.CreatedAt,
-		&gamePlayer.UpdatedAt,
+		&gp.ID,
+		&gp.GameID,
+		&gp.UserID,
+		&gp.CardSN,
+		&gp.Status,
+		&gp.CreatedAt,
+		&gp.UpdatedAt,
 	)
-
 	if err != nil {
-
+		// zero rows means the game isn't waiting (or doesn't exist)
+		if err == pgx.ErrNoRows {
+			return nil, fmt.Errorf("cannot join game %d: not in waiting status or not found", gameID)
+		}
+		// unique constraint violations
 		if pgErr, ok := err.(*pgx.PgError); ok && pgErr.Code == "23505" {
 			switch pgErr.ConstraintName {
 			case "unique_game_card":
@@ -99,12 +107,12 @@ func (s *GamePlayerStore) CreateGamePlayerIfAvailable(ctx context.Context, gameI
 				return nil, fmt.Errorf("user %d has already joined game %d", userID, gameID)
 			}
 		}
-		// Handle foreign key violations (PostgreSQL error code 23503)
+		// foreign key violations
 		if pgErr, ok := err.(*pgx.PgError); ok && pgErr.Code == "23503" {
 			return nil, fmt.Errorf("invalid reference: %s", pgErr.Message)
 		}
 		return nil, fmt.Errorf("failed to create game player: %w", err)
 	}
 
-	return gamePlayer, nil
+	return gp, nil
 }
