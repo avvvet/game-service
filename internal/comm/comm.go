@@ -73,4 +73,12 @@ type GameCard struct {
 
 type GameType struct {
 	Gtype int `json:"gtype"`
+	Gnum  int `json:"game_no"`
+}
+
+type CallMessage struct {
+	Gtype   int   `json:"gtype"`
+	Gnum    int   `json:"game_no"`
+	Number  int   `json:"number"`
+	History []int `json:"history"`
 }

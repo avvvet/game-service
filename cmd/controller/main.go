@@ -31,6 +31,7 @@ type gameInfo struct {
 	ID         int
 	GameTypeID int
 	TotPrize   int
+	GNumber    int
 }
 
 func main() {
@@ -63,7 +64,7 @@ func main() {
 		}
 
 		for _, g := range startedGames {
-			gt := comm.GameType{Gtype: g.GameTypeID}
+			gt := comm.GameType{Gtype: g.GameTypeID, Gnum: g.GNumber}
 			PublishGameStarted(n, gt)
 		}
 	}
@@ -77,7 +78,7 @@ func processWaitingGames(ctx context.Context, pool *pgxpool.Pool) ([]gameInfo, e
 	defer tx.Rollback(ctx)
 
 	rows, err := tx.Query(ctx, `
-        SELECT id, game_type_id, tot_priz
+        SELECT id, game_type_id, tot_priz, game_no
         FROM games
         WHERE status = 'waiting'
           AND created_at < now() - interval '30 seconds'
@@ -91,7 +92,7 @@ func processWaitingGames(ctx context.Context, pool *pgxpool.Pool) ([]gameInfo, e
 	var candidates []gameInfo
 	for rows.Next() {
 		var g gameInfo
-		if err := rows.Scan(&g.ID, &g.GameTypeID, &g.TotPrize); err != nil {
+		if err := rows.Scan(&g.ID, &g.GameTypeID, &g.TotPrize, &g.GNumber); err != nil {
 			return nil, fmt.Errorf("scan game row: %w", err)
 		}
 		candidates = append(candidates, g)

@@ -82,7 +82,7 @@ func (b *Broker) handleMessages(msgNats *nats.Msg) {
 	switch message.Type {
 	case "init-response", "get-wait-game-response", "player-select-card-response":
 		b.sendMessage(message)
-	case "get-wait-game-response-broadcast", "game-started":
+	case "get-wait-game-response-broadcast", "game-started", "bingo-call":
 		b.sendMessageGroup(message)
 	default:
 		log.Error("Unknown message")
@@ -103,12 +103,17 @@ func (b *Broker) sendMessage(m *comm.WSMessage) {
 // send message to group
 func (b *Broker) sendMessageGroup(m *comm.WSMessage) {
 	var payload struct {
-		Gtype int `json:"gtype"`
+		Gtype   int   `json:"gtype"`
+		Gnum    int   `json:"game_no"`
+		Number  int   `json:"number"`
+		History []int `json:"history"`
 	}
 
 	if err := json.Unmarshal(m.Data, &payload); err != nil {
 		fmt.Println("error-----")
 	}
+
+	fmt.Println(">>>>>>>> ", payload)
 
 	s, exists := b.GameRooms[payload.Gtype]
 	if exists {
