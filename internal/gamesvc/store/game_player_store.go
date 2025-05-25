@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 
 	"github.com/avvvet/bingo-services/internal/gamesvc/models"
@@ -52,12 +54,98 @@ func (s *GamePlayerStore) GetPlayersByGameID(ctx context.Context, gameID int) ([
 	return players, nil
 }
 
+func (s *GamePlayerStore) CreateGamePlayerIfAvailable(ctx context.Context, gameID int, userID int64, cardSN string) (*models.GamePlayer, error) {
+	// Start a transaction to ensure data consistency
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// First, check if the game exists and is in "waiting" status
+	var gameStatus string
+	checkGameQuery := `
+		SELECT status
+		FROM games
+		WHERE id = $1`
+	err = tx.QueryRow(ctx, checkGameQuery, gameID).Scan(&gameStatus)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("game with ID %d not found", gameID)
+		}
+		return nil, fmt.Errorf("failed to check game status: %w", err)
+	}
+
+	// Check if game is in waiting status
+	if gameStatus != "waiting" {
+		return nil, fmt.Errorf("game is not available for joining, current status: %s", gameStatus)
+	}
+
+	// Check if user is already in this game
+	var existingPlayerID int
+	checkUserQuery := `
+		SELECT id
+		FROM game_players
+		WHERE game_id = $1 AND user_id = $2`
+	err = tx.QueryRow(ctx, checkUserQuery, gameID, userID).Scan(&existingPlayerID)
+	if err == nil {
+		// Record found - user is already in the game
+		return nil, fmt.Errorf("user %d is already in game %d", userID, gameID)
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		// Some other error occurred
+		return nil, fmt.Errorf("failed to check existing user in game: %w", err)
+	}
+	// err is sql.ErrNoRows means no record found, which is what we want
+
+	// Check if card is already used in this game
+	var existingCardPlayerID int
+	checkCardQuery := `
+		SELECT id
+		FROM game_players
+		WHERE game_id = $1 AND card_sn = $2`
+	err = tx.QueryRow(ctx, checkCardQuery, gameID, cardSN).Scan(&existingCardPlayerID)
+	if err == nil {
+		// Record found - card is already used in the game
+		return nil, fmt.Errorf("card %s is already used in game %d", cardSN, gameID)
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		// Some other error occurred
+		return nil, fmt.Errorf("failed to check existing card in game: %w", err)
+	}
+	// err is sql.ErrNoRows means no record found, which is what we want
+
+	// Create the game player
+	insertQuery := `
+		INSERT INTO game_players (game_id, user_id, card_sn, status, created_at, updated_at)
+		VALUES ($1, $2, $3, 'pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		RETURNING id, game_id, user_id, card_sn, status, created_at, updated_at`
+	var gamePlayer models.GamePlayer
+	err = tx.QueryRow(ctx, insertQuery, gameID, userID, cardSN).Scan(
+		&gamePlayer.ID,
+		&gamePlayer.GameID,
+		&gamePlayer.UserID,
+		&gamePlayer.CardSN,
+		&gamePlayer.Status,
+		&gamePlayer.CreatedAt,
+		&gamePlayer.UpdatedAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create game player: %w", err)
+	}
+
+	// Commit the transaction
+	if err = tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	return &gamePlayer, nil
+}
+
 // It fails with an error if:
 // - The card is already taken by another player in the same game (unique_game_card constraint).
 // - The user has already joined the game (unique_game_user constraint).
 // - Any foreign key (game_id, user_id, card_sn) is invalid.
 // Returns the created GamePlayer on success, or an error on failure.
-func (s *GamePlayerStore) CreateGamePlayerIfAvailable(ctx context.Context, gameID int, userID int64, cardSN string) (*models.GamePlayer, error) {
+func (s *GamePlayerStore) CreateGamePlayerIfAvailableOld(ctx context.Context, gameID int, userID int64, cardSN string) (*models.GamePlayer, error) {
 	// Validate inputs
 	if gameID <= 0 {
 		return nil, fmt.Errorf("invalid game ID: %d", gameID)

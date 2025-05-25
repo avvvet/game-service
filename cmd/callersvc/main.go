@@ -50,7 +50,7 @@ func main() {
 			return
 		}
 		log.Infof("starting caller for gtype %d", gt.Gtype)
-		go startCaller(n, gt.Gtype, gt.Gnum, 5*time.Second)
+		go startCaller(n, gt.Gtype, gt.Gid, 5*time.Second)
 	})
 	if err != nil {
 		log.Fatalf("subscribe error: %v", err)
@@ -59,7 +59,7 @@ func main() {
 	select {} // block forever
 }
 
-func startCaller(n *natscli.Nats, gtype int, gnum int, interval time.Duration) {
+func startCaller(n *natscli.Nats, gtype int, gid int, interval time.Duration) {
 	// 1) prepare a shuffled deck 1–75
 	deck := rand.Perm(75)
 	for i := range deck {
@@ -86,7 +86,7 @@ func startCaller(n *natscli.Nats, gtype int, gnum int, interval time.Duration) {
 		// 3) include history in the payload
 		c := comm.CallMessage{
 			Gtype:   gtype,
-			Gnum:    gnum,
+			Gid:     gid,
 			Number:  num,
 			History: append([]int(nil), history...), // copy to avoid mutation
 

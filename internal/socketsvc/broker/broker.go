@@ -60,7 +60,7 @@ func (b *Broker) Subscribe(topic string) (*nats.Subscription, error) {
 	return sub, nil
 }
 
-// publish message to relay service
+// publish message
 func (b *Broker) Publish(topic string, payload []byte) error {
 	err := b.Conn.Publish(topic, payload)
 	if err != nil {
@@ -80,10 +80,18 @@ func (b *Broker) handleMessages(msgNats *nats.Msg) {
 	}
 
 	switch message.Type {
-	case "init-response", "get-wait-game-response", "player-select-card-response":
+	case "init-response", "get-wait-game-response":
 		b.sendMessage(message)
-	case "get-wait-game-response-broadcast", "game-started", "bingo-call":
+	case "player-select-card-response":
+		fmt.Println("player select card response comes to socket")
+		b.sendMessage(message)
+	case "game-started", "bingo-call":
 		b.sendMessageGroup(message)
+	case "get-wait-game-response-broadcast":
+		b.sendMessageGroup(message)
+	case "game-finished":
+		fmt.Println("----------------- game finished ------------------------------------------")
+		b.sendMessageWin(message)
 	default:
 		log.Error("Unknown message")
 		return
@@ -103,6 +111,7 @@ func (b *Broker) sendMessage(m *comm.WSMessage) {
 // send message to group
 func (b *Broker) sendMessageGroup(m *comm.WSMessage) {
 	var payload struct {
+		Gid     int   `json:"game_id"`
 		Gtype   int   `json:"gtype"`
 		Gnum    int   `json:"game_no"`
 		Number  int   `json:"number"`
@@ -112,8 +121,6 @@ func (b *Broker) sendMessageGroup(m *comm.WSMessage) {
 	if err := json.Unmarshal(m.Data, &payload); err != nil {
 		fmt.Println("error-----")
 	}
-
-	fmt.Println(">>>>>>>> ", payload)
 
 	s, exists := b.GameRooms[payload.Gtype]
 	if exists {
@@ -125,5 +132,27 @@ func (b *Broker) sendMessageGroup(m *comm.WSMessage) {
 			}
 		}
 	}
+}
 
+func (b *Broker) sendMessageWin(m *comm.WSMessage) {
+	var payload struct {
+		Gid      int   `json:"game_id"`
+		Gtype    int   `json:"gtype"`
+		PlayerId int64 `json:"player_id"`
+	}
+
+	if err := json.Unmarshal(m.Data, &payload); err != nil {
+		fmt.Println("error-----")
+	}
+
+	s, exists := b.GameRooms[payload.Gtype]
+	if exists {
+		for _, socketId := range s {
+			if conn, ok := b.GetConnection(socketId); ok {
+				if err := conn.WriteJSON(m); err != nil {
+					log.Println(err)
+				}
+			}
+		}
+	}
 }

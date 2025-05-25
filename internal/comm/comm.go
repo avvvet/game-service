@@ -60,10 +60,17 @@ type PlayerData struct {
 	Balance string `json:"balance"`
 }
 
+type WinData struct {
+	Gtype    int   `json:"gtype"`
+	Gid      int   `json:"game_id"`
+	PlayerId int64 `json:"player_id"`
+}
+
 type GameData struct {
-	Game    models.Game          `json:"game"`
+	Game    *models.Game         `json:"game"`
 	Players []*models.GamePlayer `json:"players"`
 	Gtype   int                  `json:"gtype"`
+	Gid     int                  `json:"game_id"`
 }
 
 type GameCard struct {
@@ -73,12 +80,13 @@ type GameCard struct {
 
 type GameType struct {
 	Gtype int `json:"gtype"`
+	Gid   int `json:"game_id"`
 	Gnum  int `json:"game_no"`
 }
 
 type CallMessage struct {
 	Gtype   int   `json:"gtype"`
-	Gnum    int   `json:"game_no"`
+	Gid     int   `json:"game_id"`
 	Number  int   `json:"number"`
 	History []int `json:"history"`
 }

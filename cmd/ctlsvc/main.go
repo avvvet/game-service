@@ -17,7 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const SERVICE_NAME = "controller"
+const SERVICE_NAME = "ctl"
 
 var instanceId string
 
@@ -64,7 +64,7 @@ func main() {
 		}
 
 		for _, g := range startedGames {
-			gt := comm.GameType{Gtype: g.GameTypeID, Gnum: g.GNumber}
+			gt := comm.GameType{Gtype: g.GameTypeID, Gid: g.ID, Gnum: g.GNumber}
 			PublishGameStarted(n, gt)
 		}
 	}
@@ -81,7 +81,7 @@ func processWaitingGames(ctx context.Context, pool *pgxpool.Pool) ([]gameInfo, e
         SELECT id, game_type_id, tot_priz, game_no
         FROM games
         WHERE status = 'waiting'
-          AND created_at < now() - interval '30 seconds'
+          AND created_at < now() - interval '120 seconds'
         FOR UPDATE SKIP LOCKED
     `)
 	if err != nil {

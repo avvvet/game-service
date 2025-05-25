@@ -30,9 +30,47 @@ func (s *Ws) SocketMessage(socketId string, message *comm.WSMessage) {
 		s.getWaitGame(socketId, message)
 	case "player-select-card":
 		s.selectCard(socketId, message)
+	case "claim-bingo":
+		s.claimBingo(socketId, message)
 	default:
 		log.Warnf("unknown event received: %s", message.Type)
 	}
+}
+
+func (s *Ws) claimBingo(socketId string, msg *comm.WSMessage) {
+	var payload struct {
+		GameID int   `json:"gameId"`
+		UserID int64 `json:"userId"`
+		Marks  []int `json:"marks"`
+	}
+
+	if err := json.Unmarshal(msg.Data, &payload); err != nil {
+		log.Errorf("Error: invalid selectCard payload %s", err)
+		return
+	}
+
+	if payload.UserID == 0 || payload.GameID == 0 {
+		log.Error("Invalid [claimBingo] payload: missing required fields")
+		return
+	}
+
+	msg.SocketId = socketId
+
+	// Marshal message for NATS
+	bytes, err := json.Marshal(msg)
+	if err != nil {
+		log.Errorf("Failed to marshal WSMessage for NATS: %v", err)
+		return
+	}
+
+	// Publish and it will be picked by claim service
+	topic := "bingo.claim"
+	if err := s.Broker.Publish(topic, bytes); err != nil {
+		log.Errorf("Failed to publish to NATS topic %s: %v", topic, err)
+		return
+	}
+
+	log.Infof("Published [claimBingo] message for user %d to topic %s", payload.UserID, topic)
 }
 
 func (s *Ws) selectCard(socketId string, msg *comm.WSMessage) {
@@ -81,6 +119,7 @@ func (s *Ws) getWaitGame(socketId string, msg *comm.WSMessage) {
 	var payload struct {
 		UserId int64 `json:"user_id"`
 		Gtype  int   `json:"gtype"`
+		Gid    int   `json:"game_id"`
 	}
 
 	if err := json.Unmarshal(msg.Data, &payload); err != nil {
@@ -98,7 +137,7 @@ func (s *Ws) getWaitGame(socketId string, msg *comm.WSMessage) {
 		return
 	}
 
-	// for socket grouping per game type
+	// for socket grouping per game id
 	s.Broker.Mu.Lock()
 	s.Broker.GameRooms[payload.Gtype] = append(s.Broker.GameRooms[payload.Gtype], socketId)
 	s.Broker.Mu.Unlock()

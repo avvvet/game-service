@@ -78,6 +78,7 @@ func (b *Broker) handleMessage(msgNat *nats.Msg) {
 		var request struct {
 			UserId int64 `json:"user_id"`
 			Gtype  int   `json:"gtype"`
+			GameId int   `json:"game_id"`
 		}
 
 		err := json.Unmarshal(msg.Data, &request)
@@ -101,7 +102,8 @@ func (b *Broker) handleMessage(msgNat *nats.Msg) {
 		}
 
 		gameData := comm.GameData{
-			Game:    *game,
+			Gid:     request.GameId,
+			Game:    game,
 			Players: players,
 		}
 
@@ -148,9 +150,10 @@ func (b *Broker) handleMessage(msgNat *nats.Msg) {
 		}
 
 		gameData := comm.GameData{
-			Game:    *game,
+			Game:    game,
 			Players: players,
 			Gtype:   request.Gtype,
+			Gid:     request.GameId,
 		}
 		// broadcast to all game type group
 		b.PublishWaitGameResponseToAll(gameData, msg.SocketId)
