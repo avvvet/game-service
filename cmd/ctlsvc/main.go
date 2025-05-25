@@ -81,7 +81,7 @@ func processWaitingGames(ctx context.Context, pool *pgxpool.Pool) ([]gameInfo, e
         SELECT id, game_type_id, tot_priz, game_no
         FROM games
         WHERE status = 'waiting'
-          AND created_at < now() - interval '40 seconds'
+          AND created_at < now() - interval '30 seconds'
         FOR UPDATE SKIP LOCKED
     `)
 	if err != nil {
@@ -110,6 +110,7 @@ func processWaitingGames(ctx context.Context, pool *pgxpool.Pool) ([]gameInfo, e
 			return nil, fmt.Errorf("count players for game %d: %w", g.ID, err)
 		}
 
+		// only start if more than one player joined
 		if count > 0 {
 			if _, err := tx.Exec(ctx, `
                 UPDATE games

@@ -136,9 +136,12 @@ func (b *Broker) sendMessageGroup(m *comm.WSMessage) {
 
 func (b *Broker) sendMessageWin(m *comm.WSMessage) {
 	var payload struct {
-		Gid      int   `json:"game_id"`
-		Gtype    int   `json:"gtype"`
-		PlayerId int64 `json:"player_id"`
+		Gid      int    `json:"game_id"`
+		Gtype    int    `json:"gtype"`
+		PlayerId int64  `json:"player_id"`
+		Name     string `json:"name"`
+		Avatar   string `json:"avatar"`
+		Marks    []int  `json:"marks"` // winer bingo card, it shows how it win
 	}
 
 	if err := json.Unmarshal(m.Data, &payload); err != nil {

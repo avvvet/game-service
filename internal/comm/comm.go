@@ -61,9 +61,12 @@ type PlayerData struct {
 }
 
 type WinData struct {
-	Gtype    int   `json:"gtype"`
-	Gid      int   `json:"game_id"`
-	PlayerId int64 `json:"player_id"`
+	Gtype    int    `json:"gtype"`
+	Gid      int    `json:"game_id"`
+	PlayerId int64  `json:"player_id"`
+	Name     string `json:"name"`
+	Avatar   string `json:"avatar"`
+	Marks    []int  `json:"marks"` // winer bing card, it shows how it win
 }
 
 type GameData struct {
