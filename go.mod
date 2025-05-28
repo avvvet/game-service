@@ -1,6 +1,8 @@
 module github.com/avvvet/bingo-services
 
-go 1.23.2
+go 1.24.1
+
+toolchain go1.24.3
 
 require (
 	github.com/go-chi/chi v1.5.5
@@ -11,16 +13,20 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/joho/godotenv v1.5.1
+	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728
 	github.com/nats-io/nats.go v1.42.0
+	github.com/shopspring/decimal v1.4.0
 	github.com/sirupsen/logrus v1.9.3
 	go.mongodb.org/mongo-driver v1.17.3
 )
 
 require (
+	github.com/cockroachdb/apd v1.1.0 // indirect
+	github.com/jackc/fake v0.0.0-20150926172116-812a484cc733 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
-	github.com/shopspring/decimal v1.4.0 // indirect
+	github.com/lib/pq v1.10.9 // indirect
 )
 
 require (

@@ -1,64 +1,86 @@
 # Makefile for Bingo microservices
 
-# Directories
-GAME_CTRL_DIR = cmd/ctlsvc
-CALLER_SVC_DIR = cmd/callersvc
-CLAIM_SVC_DIR = cmd/claimsvc
-
-# Binaries
-gamecontroller_bin = bin/ctlsvc
-callersvc_bin    = bin/callersvc
-claimsvc_bin     = bin/claimsvc
+# Binary names
+BINARY_SOCKETSVC  = socketsvc
+BINARY_GAMESVC   = gamesvc
+BINARY_CTLSVC    = ctlsvc
+BINARY_CALLERSVC = callersvc
+BINARY_CLAIMSVC  = claimsvc
+BINARY_PAYSVC    = paysvc
 
 # Default: build all services
 all: build
 
-# Build all services
-build: gamecontroller callersvc claimsvc
-
-# Build individual services
-gamecontroller:
-	clear
-	@echo "Building gamecontroller..."
-	@go build -o $(gamecontroller_bin) ./$(GAME_CTRL_DIR)
-
-callersvc:
-	clear
-	@echo "Building callersvc..."
-	@go build -o $(callersvc_bin) ./$(CALLER_SVC_DIR)
-
-claimsvc:
-	clear
-	@echo "Building claimsvc..."
-	@go build -o $(claimsvc_bin) ./$(CLAIM_SVC_DIR)
+# Build all services for Linux/amd64
+build:
+	@echo "Building linux binaries..."
+	GOARCH=amd64 GOOS=linux go build -o ./bin/$(BINARY_SOCKETSVC)  ./cmd/socketsvc/main.go
+	GOARCH=amd64 GOOS=linux go build -o ./bin/$(BINARY_GAMESVC)   ./cmd/gamesvc/main.go
+	GOARCH=amd64 GOOS=linux go build -o ./bin/$(BINARY_CTLSVC)    ./cmd/ctlsvc/main.go
+	GOARCH=amd64 GOOS=linux go build -o ./bin/$(BINARY_CALLERSVC) ./cmd/callersvc/main.go
+	GOARCH=amd64 GOOS=linux go build -o ./bin/$(BINARY_CLAIMSVC)  ./cmd/claimsvc/main.go
+	GOARCH=amd64 GOOS=linux go build -o ./bin/$(BINARY_PAYSVC)    ./cmd/paysvc/main.go
+	@echo "Build complete."
 
 # Run individual services
-run-gamecontroller:
-	clear
-	@echo "Running gamecontroller..."
-	@$(gamecontroller_bin)
+socketsvc: build
+	@echo "Running $(BINARY_SOCKETSVC)..."
+	@./bin/$(BINARY_SOCKETSVC)
 
-run-callersvc:
-	clear
-	@echo "Running callersvc..."
-	@$(callersvc_bin)
+gamesvc: build
+	@echo "Running $(BINARY_GAMESVC)..."
+	@./bin/$(BINARY_GAMESVC)
 
-run-claimsvc:
-	clear
-	@echo "Running claimsvc..."
-	@$(claimsvc_bin)
+ctlsvc: build
+	@echo "Running $(BINARY_CTLSVC)..."
+	@./bin/$(BINARY_CTLSVC)
 
-# Run all services (in separate terminals or background)
-run: run-gamecontroller run-callersvc run-claimsvc
+callersvc: build
+	@echo "Running $(BINARY_CALLERSVC)..."
+	@./bin/$(BINARY_CALLERSVC)
+
+claimsvc: build
+	@echo "Running $(BINARY_CLAIMSVC)..."
+	@./bin/$(BINARY_CLAIMSVC)
+
+paysvc: build
+	@echo "Running $(BINARY_PAYSVC)..."
+	@./bin/$(BINARY_PAYSVC)
+
+# Directory to hold pid files
+PIDDIR := .pids
+
+run-all: build
+	@mkdir -p $(PIDDIR)
+	@echo "Starting all services..."
+	@for svc in \
+		$(BINARY_SOCKETSVC) \
+		$(BINARY_GAMESVC) \
+		$(BINARY_CTLSVC) \
+		$(BINARY_CALLERSVC) \
+		$(BINARY_CLAIMSVC) \
+		$(BINARY_PAYSVC); do \
+	  ./bin/$$svc & \
+	  echo $$! > $(PIDDIR)/$$svc.pid; \
+	done
+	@echo "All services started. PIDs in $(PIDDIR)/*.pid"
+
+stop-all:
+	@echo "Stopping all services..."
+	@for pidfile in $(PIDDIR)/*.pid; do \
+	  [ -f $$pidfile ] && kill $$(cat $$pidfile) 2>/dev/null; \
+	done
+	@rm -rf $(PIDDIR)
+	@echo "All services stopped."
+
 
 # Clean built binaries
 clean:
-	clear
 	@echo "Cleaning binaries..."
+	@go clean
 	@rm -rf bin/*
 
 # Tidy go modules
 tidy:
-	clear
 	@echo "Tidying modules..."
 	@go mod tidy

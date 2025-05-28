@@ -4,8 +4,8 @@ CREATE TABLE balances (
     ttype VARCHAR(50) NOT NULL,              -- Transaction type: deposit, withdraw, etc.
     dr NUMERIC(20, 2) NOT NULL,              -- debit postive amount with 2 decimal places
     cr NUMERIC(20, 2) NOT NULL,              -- credit negative amount with 2 decimal places
-    tref VARCHAR(50),                        -- e.g., pending, completed, failed
-    status VARCHAR(50) DEFAULT 'pending',    -- e.g., pending, completed, failed
+    tref VARCHAR(50)  UNIQUE,                        
+    status VARCHAR(50) DEFAULT 'pending',    -- e.g., pending, verified
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );

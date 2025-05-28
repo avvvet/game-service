@@ -22,7 +22,7 @@ const SERVICE_NAME = "ctl"
 var instanceId string
 
 func init() {
-	instanceId = config.CreateUniqueInstance(SERVICE_NAME)
+	instanceId = "001"
 	config.Logging(SERVICE_NAME + "_service_" + instanceId)
 	config.LoadEnv(SERVICE_NAME)
 }

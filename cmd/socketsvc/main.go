@@ -24,7 +24,7 @@ import (
 const SERVICE_NAME = "socket"
 
 func init() {
-	instanceId := config.CreateUniqueInstance(SERVICE_NAME)
+	instanceId := "001"
 	config.Logging(SERVICE_NAME + "_service_" + instanceId)
 	config.LoadEnv(SERVICE_NAME)
 }
@@ -79,7 +79,7 @@ func main() {
 
 	// Create server with timeout settings
 	server := &http.Server{
-		Addr:         ":" + os.Getenv("SERVICE_PORT"),
+		Addr:         ":" + os.Getenv("SOCKET_SERVICE_PORT"),
 		Handler:      r,
 		ReadTimeout:  60 * time.Second,
 		WriteTimeout: 60 * time.Second,

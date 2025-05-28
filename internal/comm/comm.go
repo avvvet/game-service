@@ -60,6 +60,10 @@ type PlayerData struct {
 	Balance string `json:"balance"`
 }
 
+type DepositeRes struct {
+	Status string `json:"status"` // sucess, faild
+}
+
 type WinData struct {
 	Gtype    int    `json:"gtype"`
 	Gid      int    `json:"game_id"`
@@ -92,4 +96,10 @@ type CallMessage struct {
 	Gid     int   `json:"game_id"`
 	Number  int   `json:"number"`
 	History []int `json:"history"`
+}
+
+// PaymentRequest is the incoming event when a user submits a reference
+type PaymentRequest struct {
+	UserID    int64  `json:"userId"`
+	Reference string `json:"referenceNumber"`
 }

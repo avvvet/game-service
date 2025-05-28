@@ -19,7 +19,7 @@ const SERVICE_NAME = "caller"
 var instanceId string
 
 func init() {
-	instanceId = config.CreateUniqueInstance(SERVICE_NAME)
+	instanceId = "001"
 	config.Logging(SERVICE_NAME + "_service_" + instanceId)
 	config.LoadEnv(SERVICE_NAME)
 	rand.Seed(time.Now().UnixNano())

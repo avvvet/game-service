@@ -22,7 +22,7 @@ const SERVICE_NAME = "claim"
 var instanceId string
 
 func init() {
-	instanceId = config.CreateUniqueInstance(SERVICE_NAME)
+	instanceId = "001"
 	config.Logging(SERVICE_NAME + "_service_" + instanceId)
 	config.LoadEnv(SERVICE_NAME)
 }
@@ -31,7 +31,7 @@ func init() {
 var decks sync.Map // key: int, value: []int
 
 func main() {
-	// PostgreSQL connection
+
 	// pg connection
 	dbpool, err := db.Connect()
 	if err != nil {
@@ -208,105 +208,6 @@ func handleClaim(n *natscli.Nats, pool *pgxpool.Pool, msg *nats.Msg) {
 		Avatar:   avatar,
 		Marks:    claim.Marks,
 	}
-	PublishWin(n, winData, ws.SocketId)
-}
-
-// handleClaim validates a Bingo claim in a DB transaction and publishes result
-func handleClaimOld(n *natscli.Nats, pool *pgxpool.Pool, msg *nats.Msg) {
-	var ws comm.WSMessage
-	if err := json.Unmarshal(msg.Data, &ws); err != nil {
-		log.Errorf("invalid WSMessage: %v", err)
-		return
-	}
-	if ws.Type != "claim-bingo" {
-		return
-	}
-	var claim ClaimMessage
-	if err := json.Unmarshal(ws.Data, &claim); err != nil {
-		log.Errorf("invalid ClaimMessage: %v", err)
-		return
-	}
-
-	ctx := context.Background()
-
-	// Begin transaction to ensure only one winner
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		log.Errorf("begin tx: %v", err)
-		return
-	}
-	defer tx.Rollback(ctx)
-
-	// Lock game row and verify status
-	var status string
-	if err := tx.QueryRow(ctx, `SELECT status FROM games WHERE id=$1 FOR UPDATE`, claim.GameID).Scan(&status); err != nil {
-		log.Errorf("lock game row: %v", err)
-		return
-	}
-	if status != "started" {
-		log.Infof("game %d not in 'started' state", claim.GameID)
-		return
-	}
-
-	// Fetch player card
-	card, err := GetPlayerCard(ctx, pool, claim.GameID, claim.UserID)
-	if err != nil {
-		log.Errorf("GetPlayerCard error: %v", err)
-		return
-	}
-
-	// Retrieve deck history from in-memory map
-	hv, ok := decks.Load(claim.GameID)
-	if !ok {
-		log.Errorf("no call history for game %d", claim.GameID)
-		return
-	}
-	history, ok := hv.([]int)
-	if !ok {
-		log.Errorf("invalid history type for game %d", claim.GameID)
-		return
-	}
-
-	// Validate Bingo pattern
-
-	if !ValidateBingo(card, history, claim.Marks) {
-		rej := comm.WSMessage{Type: "bingo-claim-rejected", Data: ws.Data, SocketId: ws.SocketId}
-		payload, _ := json.Marshal(rej)
-		n.Conn.Publish("bingo-replies", payload)
-		return
-	}
-
-	// Mark game as ended and record winner
-	res, err := tx.Exec(ctx, `
-		UPDATE games
-		SET status='ended', user_id=$1, updated_at=now()
-		WHERE id=$2 AND status='started'
-	`, claim.UserID, claim.GameID)
-	if err != nil {
-		log.Errorf("update game error: %v", err)
-		return
-	}
-	// Check how many rows were affected
-	ra := res.RowsAffected()
-	if ra != 1 {
-		// No row updated means another claim won first or game not in started state
-		log.Infof("game %d already concluded (rows affected: %d)", claim.GameID, ra)
-		return
-	}
-
-	// Commit the transaction
-	if err := tx.Commit(ctx); err != nil {
-		log.Errorf("commit tx: %v", err)
-		return
-	}
-
-	// Broadcast game-ended to all subscribers to all subscribers
-	winData := comm.WinData{
-		PlayerId: claim.UserID,
-		Gid:      claim.GameID,
-		Gtype:    claim.Gtype,
-	}
-
 	PublishWin(n, winData, ws.SocketId)
 }
 

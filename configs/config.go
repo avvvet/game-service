@@ -18,7 +18,7 @@ var InstanceId string
 
 func LoadEnv(service string) {
 	log.Info("service configuration and env variables loading started ...")
-	err := godotenv.Load("./.env." + service + "svc")
+	err := godotenv.Load("./.env")
 	if err != nil {
 		log.Fatal("Error loading .env file")
 	}

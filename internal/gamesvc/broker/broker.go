@@ -74,6 +74,29 @@ func (b *Broker) handleMessage(msgNat *nats.Msg) {
 		// publish to socket service
 		//balance := decimal.NewFromFloat(40000.34)
 		b.PublishInitResponse(playerData, msg.SocketId)
+	case "get-balance":
+		var request struct {
+			UserID int64 `json:"userId"`
+		}
+		err := json.Unmarshal(msg.Data, &request)
+		if err != nil {
+			log.Errorf("Error %s", err)
+		}
+
+		// get user balance
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		balance, err := b.BalanceService.GetUserBalance(ctx, request.UserID)
+		if err != nil {
+			log.Errorf("Error getBalance %s", err)
+		}
+
+		playerData := comm.PlayerData{
+			Balance: balance.StringFixed(2),
+		}
+
+		b.PublishBalance(playerData, msg.SocketId)
+
 	case "get-wait-game":
 		var request struct {
 			UserId int64 `json:"user_id"`
@@ -174,6 +197,28 @@ func (b *Broker) handleMessage(msgNat *nats.Msg) {
 		log.Error("Unknown message")
 		return
 	}
+}
+
+func (b *Broker) PublishBalance(p comm.PlayerData, socketId string) {
+	data, err := json.Marshal(p)
+	if err != nil {
+		log.Errorf("publishBalance unable to marsahl playerData")
+	}
+
+	msg := &comm.WSMessage{
+		Type:     "balance-resp",
+		Data:     data,
+		SocketId: socketId,
+	}
+
+	payload, err := json.Marshal(msg)
+	if err != nil {
+		log.Errorf("Error %s", err)
+	}
+
+	topic := "game.service"
+	b.Publish(topic, payload)
+
 }
 
 func (b *Broker) PublishSelectCardResponse(p comm.GameCard, socketId string) {

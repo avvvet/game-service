@@ -23,7 +23,7 @@ func (c *BalanceStore) GetBalanceByUserID(ctx context.Context, userId int64) (de
             COALESCE(SUM(dr), 0), 
             COALESCE(SUM(cr), 0)
         FROM balances
-        WHERE user_id = $1 AND status = 'completed'
+        WHERE user_id = $1 AND status = 'verified'
     `, userId).Scan(&totalDr, &totalCr)
 
 	if err != nil {

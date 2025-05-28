@@ -26,15 +26,88 @@ func (s *Ws) SocketMessage(socketId string, message *comm.WSMessage) {
 	switch message.Type {
 	case "init":
 		s.handleInit(socketId, message)
+	case "get-balance":
+		s.getBalance(socketId, message)
 	case "get-wait-game":
 		s.getWaitGame(socketId, message)
 	case "player-select-card":
 		s.selectCard(socketId, message)
 	case "claim-bingo":
 		s.claimBingo(socketId, message)
+	case "deposite":
+		s.deposite(socketId, message)
 	default:
 		log.Warnf("unknown event received: %s", message.Type)
 	}
+}
+
+func (s *Ws) getBalance(socketId string, msg *comm.WSMessage) {
+	var payload struct {
+		UserID int64 `json:"userId"`
+	}
+
+	if err := json.Unmarshal(msg.Data, &payload); err != nil {
+		log.Errorf("Error: invalid selectCard payload %s", err)
+		return
+	}
+
+	if payload.UserID == 0 {
+		log.Error("Invalid getBalance payload: missing required fields")
+		return
+	}
+
+	msg.SocketId = socketId
+
+	// Marshal message for NATS
+	bytes, err := json.Marshal(msg)
+	if err != nil {
+		log.Errorf("Failed to marshal WSMessage for NATS: %v", err)
+		return
+	}
+
+	// Publish and it will be picked by pay service
+	topic := "socket.service"
+	if err := s.Broker.Publish(topic, bytes); err != nil {
+		log.Errorf("Failed to publish to NATS topic %s: %v", topic, err)
+		return
+	}
+
+	log.Infof("Published getBalance message for user %d to topic %s", payload.UserID, topic)
+}
+
+func (s *Ws) deposite(socketId string, msg *comm.WSMessage) {
+	var payload struct {
+		UserID    int64  `json:"userId"`
+		Reference string `json:"referenceNumber"`
+	}
+
+	if err := json.Unmarshal(msg.Data, &payload); err != nil {
+		log.Errorf("Error: invalid selectCard payload %s", err)
+		return
+	}
+
+	if payload.UserID == 0 || payload.Reference == "" {
+		log.Error("Invalid [deposite] payload: missing required fields")
+		return
+	}
+
+	msg.SocketId = socketId
+
+	// Marshal message for NATS
+	bytes, err := json.Marshal(msg)
+	if err != nil {
+		log.Errorf("Failed to marshal WSMessage for NATS: %v", err)
+		return
+	}
+
+	// Publish and it will be picked by pay service
+	topic := "payment.request"
+	if err := s.Broker.Publish(topic, bytes); err != nil {
+		log.Errorf("Failed to publish to NATS topic %s: %v", topic, err)
+		return
+	}
+
+	log.Infof("Published [payment.request] message for user %d to topic %s", payload.UserID, topic)
 }
 
 func (s *Ws) claimBingo(socketId string, msg *comm.WSMessage) {

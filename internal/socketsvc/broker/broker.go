@@ -83,14 +83,16 @@ func (b *Broker) handleMessages(msgNats *nats.Msg) {
 	case "init-response", "get-wait-game-response":
 		b.sendMessage(message)
 	case "player-select-card-response":
-		fmt.Println("player select card response comes to socket")
+		b.sendMessage(message)
+	case "deposite-res":
+		b.sendMessage(message)
+	case "balance-resp":
 		b.sendMessage(message)
 	case "game-started", "bingo-call":
 		b.sendMessageGroup(message)
 	case "get-wait-game-response-broadcast":
 		b.sendMessageGroup(message)
 	case "game-finished":
-		fmt.Println("----------------- game finished ------------------------------------------")
 		b.sendMessageWin(message)
 	default:
 		log.Error("Unknown message")
