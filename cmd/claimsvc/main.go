@@ -101,6 +101,430 @@ func handleClaim(n *natscli.Nats, pool *pgxpool.Pool, msg *nats.Msg) {
 	if ws.Type != "claim-bingo" {
 		return
 	}
+
+	var claim ClaimMessage
+	if err := json.Unmarshal(ws.Data, &claim); err != nil {
+		log.Errorf("invalid ClaimMessage: %v", err)
+		return
+	}
+
+	ctx := context.Background()
+
+	// Begin a transaction to lock the game row and perform all balance updates atomically
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		log.Errorf("begin tx: %v", err)
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	// 1) Lock the game row and verify it’s still “started”
+	var status string
+	if err := tx.QueryRow(ctx, `
+        SELECT status
+          FROM games
+         WHERE id = $1
+           FOR UPDATE
+    `, claim.GameID).Scan(&status); err != nil {
+		log.Errorf("lock game row: %v", err)
+		return
+	}
+	if status != "started" {
+		log.Infof("game %d not in 'started' state", claim.GameID)
+		return
+	}
+
+	// 2) Fetch this player's card and validate Bingo
+	card, err := GetPlayerCard(ctx, pool, claim.GameID, claim.UserID)
+	if err != nil {
+		log.Errorf("GetPlayerCard error: %v", err)
+		return
+	}
+
+	hv, ok := decks.Load(claim.GameID)
+	if !ok {
+		log.Errorf("no call history for game %d", claim.GameID)
+		return
+	}
+	history, ok := hv.([]int)
+	if !ok {
+		log.Errorf("invalid history type for game %d", claim.GameID)
+		return
+	}
+
+	if !ValidateBingo(card, history, claim.Marks) {
+		// Reject invalid bingo
+		rej := comm.WSMessage{
+			Type:     "bingo-claim-rejected",
+			Data:     ws.Data,
+			SocketId: ws.SocketId,
+		}
+		payload, _ := json.Marshal(rej)
+		n.Conn.Publish("bingo-replies", payload)
+		return
+	}
+
+	// 3) Mark game as ended and record the winner
+	res, err := tx.Exec(ctx, `
+        UPDATE games
+           SET status     = 'ended',
+               user_id    = $1,
+               updated_at = now()
+         WHERE id = $2
+           AND status = 'started'
+    `, claim.UserID, claim.GameID)
+	if err != nil {
+		log.Errorf("update game error: %v", err)
+		return
+	}
+	if ra := res.RowsAffected(); ra != 1 {
+		log.Infof("game %d already concluded (rows affected: %d)", claim.GameID, ra)
+		return
+	}
+
+	// 4) Gather all participants for this game
+	rows, err := tx.Query(ctx, `
+        SELECT user_id
+          FROM game_players
+         WHERE game_id = $1
+    `, claim.GameID)
+	if err != nil {
+		log.Errorf("fetch game_players: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	var allPlayers []int64
+	for rows.Next() {
+		var uid int64
+		if err := rows.Scan(&uid); err != nil {
+			log.Errorf("scan game_player row: %v", err)
+			return
+		}
+		allPlayers = append(allPlayers, uid)
+	}
+	if err := rows.Err(); err != nil {
+		log.Errorf("rows error: %v", err)
+		return
+	}
+
+	// 5) If only one player, skip any balance inserts
+	if len(allPlayers) == 1 {
+		// Fetch winner’s name & avatar (optional) for publishing WinData
+		var name, avatar string
+		_ = tx.QueryRow(ctx, `
+            SELECT name, avatar
+              FROM users
+             WHERE user_id = $1
+        `, claim.UserID).Scan(&name, &avatar)
+
+		if err := tx.Commit(ctx); err != nil {
+			log.Errorf("commit tx: %v", err)
+			return
+		}
+
+		winData := comm.WinData{
+			PlayerId: claim.UserID,
+			Gid:      claim.GameID,
+			Gtype:    claim.Gtype,
+			Name:     name,
+			Avatar:   avatar,
+			Marks:    claim.Marks,
+		}
+		PublishWin(n, winData, ws.SocketId)
+		return
+	}
+
+	// 6) Compute the pool amounts for multi‐player case
+	N := len(allPlayers)
+	entryFee := 10.0
+	totalPool := entryFee * float64(N) // e.g. 10 * 3 = 30
+	houseCut := totalPool * 0.10       // e.g. 3
+	winnerDR := totalPool - houseCut   // e.g. 30 - 3 = 27
+
+	// 7) Insert one 'game-loss' (CR = 10) for each loser
+	for _, uid := range allPlayers {
+		if uid == claim.UserID {
+			continue // skip the winner
+		}
+		tref := fmt.Sprintf("G%d-LOSER-%d", claim.GameID, uid)
+		if _, err := tx.Exec(ctx, `
+            INSERT INTO balances
+                (user_id, ttype, dr, cr, tref, status)
+            VALUES ($1, 'game-loss', 0, $2, $3, 'verified')
+        `, uid, entryFee, tref); err != nil {
+			log.Errorf("insert loser balance for user %d: %v", uid, err)
+			return
+		}
+	}
+
+	// 8) Insert winner’s two rows:
+
+	//    a) DR = totalPool - houseCut  (e.g. 27)
+	winnerTrefDR := fmt.Sprintf("G%d-WINNER-DR-%d", claim.GameID, claim.UserID)
+	if _, err := tx.Exec(ctx, `
+        INSERT INTO balances
+            (user_id, ttype, dr, cr, tref, status)
+        VALUES ($1, 'game-win', $2, 0, $3, 'verified')
+    `, claim.UserID, winnerDR, winnerTrefDR); err != nil {
+		log.Errorf("insert winner DR entry: %v", err)
+		return
+	}
+
+	//    b) CR = entryFee (winner’s own fee)
+	winnerTrefCR := fmt.Sprintf("G%d-WINNER-CR-%d", claim.GameID, claim.UserID)
+	if _, err := tx.Exec(ctx, `
+        INSERT INTO balances
+            (user_id, ttype, dr, cr, tref, status)
+        VALUES ($1, 'game-fee', 0, $2, $3, 'verified')
+    `, claim.UserID, entryFee, winnerTrefCR); err != nil {
+		log.Errorf("insert winner CR entry: %v", err)
+		return
+	}
+
+	// 9) Insert the house fee (CR = houseCut) for the static house user
+	const houseUserID = 1000000000000000000 // replace with your actual house-account user_id
+	houseTref := fmt.Sprintf("G%d-HOUSE-FEE", claim.GameID)
+	if _, err := tx.Exec(ctx, `
+        INSERT INTO balances
+            (user_id, ttype, dr, cr, tref, status)
+        VALUES ($1, 'house-fee', 0, $2, $3, 'verified')
+    `, houseUserID, houseCut, houseTref); err != nil {
+		log.Errorf("insert house fee balance: %v", err)
+		return
+	}
+
+	// 10) Fetch winner’s name & avatar for publishing WinData
+	var name, avatar string
+	if err := tx.QueryRow(ctx, `
+        SELECT name, avatar
+          FROM users
+         WHERE user_id = $1
+    `, claim.UserID).Scan(&name, &avatar); err != nil {
+		log.Errorf("fetch user info: %v", err)
+		return
+	}
+
+	// 11) Commit the transaction
+	if err := tx.Commit(ctx); err != nil {
+		log.Errorf("commit tx: %v", err)
+		return
+	}
+
+	// 12) Publish winner info
+	winData := comm.WinData{
+		PlayerId: claim.UserID,
+		Gid:      claim.GameID,
+		Gtype:    claim.Gtype,
+		Name:     name,
+		Avatar:   avatar,
+		Marks:    claim.Marks,
+	}
+	PublishWin(n, winData, ws.SocketId)
+}
+
+func handleClaimOldold(n *natscli.Nats, pool *pgxpool.Pool, msg *nats.Msg) {
+	var ws comm.WSMessage
+	if err := json.Unmarshal(msg.Data, &ws); err != nil {
+		log.Errorf("invalid WSMessage: %v", err)
+		return
+	}
+	if ws.Type != "claim-bingo" {
+		return
+	}
+
+	var claim ClaimMessage
+	if err := json.Unmarshal(ws.Data, &claim); err != nil {
+		log.Errorf("invalid ClaimMessage: %v", err)
+		return
+	}
+
+	ctx := context.Background()
+
+	// Begin transaction to ensure only one winner + balance updates
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		log.Errorf("begin tx: %v", err)
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	// 1) Lock game row and verify status
+	var status string
+	if err := tx.QueryRow(ctx, `
+        SELECT status
+          FROM games
+         WHERE id = $1
+           FOR UPDATE
+    `, claim.GameID).Scan(&status); err != nil {
+		log.Errorf("lock game row: %v", err)
+		return
+	}
+	if status != "started" {
+		log.Infof("game %d not in 'started' state", claim.GameID)
+		return
+	}
+
+	// 2) Fetch player card and validate bingo
+	card, err := GetPlayerCard(ctx, pool, claim.GameID, claim.UserID)
+	if err != nil {
+		log.Errorf("GetPlayerCard error: %v", err)
+		return
+	}
+
+	hv, ok := decks.Load(claim.GameID)
+	if !ok {
+		log.Errorf("no call history for game %d", claim.GameID)
+		return
+	}
+	history, ok := hv.([]int)
+	if !ok {
+		log.Errorf("invalid history type for game %d", claim.GameID)
+		return
+	}
+
+	if !ValidateBingo(card, history, claim.Marks) {
+		rej := comm.WSMessage{
+			Type:     "bingo-claim-rejected",
+			Data:     ws.Data,
+			SocketId: ws.SocketId,
+		}
+		payload, _ := json.Marshal(rej)
+		n.Conn.Publish("bingo-replies", payload)
+		return
+	}
+
+	// 3) Mark game as ended and record winner
+	res, err := tx.Exec(ctx, `
+        UPDATE games
+           SET status  = 'ended',
+               user_id = $1,
+               updated_at = now()
+         WHERE id = $2
+           AND status = 'started'
+    `, claim.UserID, claim.GameID)
+	if err != nil {
+		log.Errorf("update game error: %v", err)
+		return
+	}
+	if ra := res.RowsAffected(); ra != 1 {
+		log.Infof("game %d already concluded (rows affected: %d)", claim.GameID, ra)
+		return
+	}
+
+	// 4) Gather all participants for this game
+	rows, err := tx.Query(ctx, `
+        SELECT user_id
+          FROM game_players
+         WHERE game_id = $1
+    `, claim.GameID)
+	if err != nil {
+		log.Errorf("fetch game_players: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	var allPlayers []int64
+	for rows.Next() {
+		var uid int64
+		if err := rows.Scan(&uid); err != nil {
+			log.Errorf("scan game_player row: %v", err)
+			return
+		}
+		allPlayers = append(allPlayers, uid)
+	}
+	if err := rows.Err(); err != nil {
+		log.Errorf("rows error: %v", err)
+		return
+	}
+
+	// 5) Compute pool amounts
+	N := len(allPlayers)
+	entryFee := 10.0
+	totalPool := entryFee * float64(N)
+	houseCut := totalPool * 0.10         // 10% of total
+	winnerPayout := totalPool - houseCut // 90% of total
+
+	// 6) Insert one 'game-loss' (cr=10) for each loser
+	for _, uid := range allPlayers {
+		if uid == claim.UserID {
+			continue // skip winner
+		}
+		tref := fmt.Sprintf("G%d-LOSER-%d", claim.GameID, uid)
+		_, err := tx.Exec(ctx, `
+            INSERT INTO balances
+                (user_id, ttype, dr, cr, tref, status)
+            VALUES ($1, 'game-loss', 0, $2, $3, 'verified')
+        `, uid, entryFee, tref)
+		if err != nil {
+			log.Errorf("insert loser balance for user %d: %v", uid, err)
+			return
+		}
+	}
+
+	// 7) Insert one 'game-win' (dr=winnerPayout) for the winner
+	winnerTref := fmt.Sprintf("G%d-WINNER-%d", claim.GameID, claim.UserID)
+	_, err = tx.Exec(ctx, `
+        INSERT INTO balances
+            (user_id, ttype, dr, cr, tref, status)
+        VALUES ($1, 'game-win', $2, 0, $3, 'verified')
+    `, claim.UserID, winnerPayout, winnerTref)
+	if err != nil {
+		log.Errorf("insert winner balance: %v", err)
+		return
+	}
+
+	// 8) Insert one 'house-fee' (cr=houseCut) for the static house user
+	const houseUserID = 1000000000000000000 // ← replace with your actual static ID
+	houseTref := fmt.Sprintf("G%d-HOUSE", claim.GameID)
+	_, err = tx.Exec(ctx, `
+        INSERT INTO balances
+            (user_id, ttype, dr, cr, tref, status)
+        VALUES ($1, 'house-fee', 0, $2, $3, 'verified')
+    `, houseUserID, houseCut, houseTref)
+	if err != nil {
+		log.Errorf("insert house fee balance: %v", err)
+		return
+	}
+
+	// 9) Fetch winner’s name & avatar (optional – for emitting WinData)
+	var name, avatar string
+	if err := tx.QueryRow(ctx, `
+        SELECT name, avatar
+          FROM users
+         WHERE user_id = $1
+    `, claim.UserID).Scan(&name, &avatar); err != nil {
+		log.Errorf("fetch user info: %v", err)
+		return
+	}
+
+	// 10) Commit the entire transaction
+	if err := tx.Commit(ctx); err != nil {
+		log.Errorf("commit tx: %v", err)
+		return
+	}
+
+	// 11) Build and publish win data
+	winData := comm.WinData{
+		PlayerId: claim.UserID,
+		Gid:      claim.GameID,
+		Gtype:    claim.Gtype,
+		Name:     name,
+		Avatar:   avatar,
+		Marks:    claim.Marks,
+	}
+	PublishWin(n, winData, ws.SocketId)
+}
+
+func handleClaimOld(n *natscli.Nats, pool *pgxpool.Pool, msg *nats.Msg) {
+	var ws comm.WSMessage
+	if err := json.Unmarshal(msg.Data, &ws); err != nil {
+		log.Errorf("invalid WSMessage: %v", err)
+		return
+	}
+	if ws.Type != "claim-bingo" {
+		return
+	}
 	var claim ClaimMessage
 	if err := json.Unmarshal(ws.Data, &claim); err != nil {
 		log.Errorf("invalid ClaimMessage: %v", err)
