@@ -2,14 +2,19 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"math/rand"
 	"time"
 
+	"github.com/jackc/pgx"
+	"github.com/jackc/pgx/v5/pgxpool"
 	log "github.com/sirupsen/logrus"
 
 	config "github.com/avvvet/bingo-services/configs"
 	"github.com/avvvet/bingo-services/internal/comm"
+	"github.com/avvvet/bingo-services/internal/gamesvc/db"
 	natscli "github.com/avvvet/bingo-services/internal/nats"
 	"github.com/nats-io/nats.go"
 )
@@ -26,6 +31,14 @@ func init() {
 }
 
 func main() {
+	// pg connection
+	dbpool, err := db.Connect()
+	if err != nil {
+		log.Fatalf("Failed to connect to DB: %v", err)
+	}
+	defer db.ClosePool()
+	log.Printf("pg connection established successfully")
+
 	// connect to NATS
 	n, err := natscli.Connect()
 	if err != nil {
@@ -50,7 +63,7 @@ func main() {
 			return
 		}
 		log.Infof("starting caller for gtype %d", gt.Gtype)
-		go startCaller(n, gt.Gtype, gt.Gid, 5*time.Second)
+		go startCaller(n, gt.Gtype, gt.Gid, 5*time.Second, dbpool)
 	})
 	if err != nil {
 		log.Fatalf("subscribe error: %v", err)
@@ -59,7 +72,7 @@ func main() {
 	select {} // block forever
 }
 
-func startCaller(n *natscli.Nats, gtype int, gid int, interval time.Duration) {
+func startCaller(n *natscli.Nats, gtype int, gid int, interval time.Duration, dbPool *pgxpool.Pool) {
 	// 1) prepare a shuffled deck 1–75
 	deck := rand.Perm(75)
 	for i := range deck {
@@ -76,6 +89,15 @@ func startCaller(n *natscli.Nats, gtype int, gid int, interval time.Duration) {
 	for range ticker.C {
 		if cursor >= len(deck) {
 			log.Infof("caller done for gtype %d", gtype)
+			time.Sleep(5 * time.Second)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			if err := expireGameIfUnended(ctx, dbPool, gid); err != nil {
+				log.Errorf("expireGameIfUnended: %v", err)
+			}
+
 			return
 		}
 		num := deck[cursor]
@@ -117,4 +139,32 @@ func PublishBingoCall(n *natscli.Nats, c comm.CallMessage) {
 	if err := n.Conn.Publish("game.service", payload); err != nil {
 		log.Errorf("error publishing game.service for gtype %d: %v", c.Gtype, err)
 	}
+}
+
+func expireGameIfUnended(ctx context.Context, pool *pgxpool.Pool, gid int) error {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var status string
+	err = tx.QueryRow(ctx, `SELECT status FROM games WHERE id = $1 FOR UPDATE`, gid).Scan(&status)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			log.Warnf("expireGameIfUnended: game gid=%d not found", gid)
+			return nil
+		}
+		return fmt.Errorf("query game status: %w", err)
+	}
+
+	if status != "ended" {
+		_, err = tx.Exec(ctx, `UPDATE games SET status = 'canceled' WHERE id = $1`, gid)
+		if err != nil {
+			return fmt.Errorf("update game status: %w", err)
+		}
+		log.Infof("Game gid=%d marked as canceled", gid)
+	}
+
+	return tx.Commit(ctx)
 }

@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
-	"time"
 
 	"github.com/avvvet/bingo-services/internal/comm"
 	"github.com/gorilla/websocket"
@@ -17,30 +16,20 @@ type Broker struct {
 	GetConnection  func(string) (*websocket.Conn, bool)
 	GetRoomSockets func(string) ([]string, bool)
 
-	RelayMap        sync.Map // keeps available relay services
-	RoomToRelayMap  sync.Map // to keep track of roomId with relayId
-	RoundRobinIndex int      // Counter for round-robin
-	RRmtx           sync.Mutex
-
-	LastHeartbeatMap   sync.Map // Map to store the last heartbeat timestamp
-	heartbeatThreshold time.Duration
-
 	GameRooms map[int][]string // Gtype -> slice of clients
 	Mu        sync.RWMutex
 }
 
 func NewBroker(conn *nats.Conn, fncGetConnection func(string) (*websocket.Conn, bool), fncGetRoomSockets func(string) ([]string, bool)) *Broker {
 	return &Broker{
-		Conn:               conn,
-		GetConnection:      fncGetConnection,
-		GetRoomSockets:     fncGetRoomSockets,
-		heartbeatThreshold: time.Second * 15,
+		Conn:           conn,
+		GetConnection:  fncGetConnection,
+		GetRoomSockets: fncGetRoomSockets,
 
 		GameRooms: make(map[int][]string),
 	}
 }
 
-// consume message from relay service
 func (b *Broker) QueueSubscribe(topic, queueGroup string) (*nats.Subscription, error) {
 	sub, err := b.Conn.QueueSubscribe(topic, queueGroup, b.handleMessages)
 	if err != nil {
@@ -50,7 +39,6 @@ func (b *Broker) QueueSubscribe(topic, queueGroup string) (*nats.Subscription, e
 	return sub, nil
 }
 
-// consume message from relay service
 func (b *Broker) Subscribe(topic string) (*nats.Subscription, error) {
 	sub, err := b.Conn.Subscribe(topic, b.handleMessages)
 	if err != nil {
@@ -84,7 +72,9 @@ func (b *Broker) handleMessages(msgNats *nats.Msg) {
 		b.sendMessage(message)
 	case "player-select-card-response":
 		b.sendMessage(message)
-	case "deposite-res":
+	case "player-cancel-card-response", "insufficient-balance-response", "check-active-game-response", "bingo-claim-rejected":
+		b.sendMessage(message)
+	case "deposite-res", "withdrawal-res":
 		b.sendMessage(message)
 	case "balance-resp":
 		b.sendMessage(message)

@@ -63,10 +63,42 @@ func main() {
 			continue
 		}
 
+		// Convert GameType ID to Fee before publishing
 		for _, g := range startedGames {
-			gt := comm.GameType{Gtype: g.GameTypeID, Gid: g.ID, Gnum: g.GNumber}
+			// Convert GameTypeID (1,2,3,4,5,6) to fee (10,20,40,50,100,200)
+			gameTypeFee := convertGameTypeIDToFee(g.GameTypeID)
+
+			// Create GameType with converted fee value
+			gt := comm.GameType{
+				Gtype: gameTypeFee, // Now contains fee (10,20,40,50,100,200) instead of ID
+				Gid:   g.ID,
+				Gnum:  g.GNumber,
+			}
+
 			PublishGameStarted(n, gt)
 		}
+	}
+}
+
+// Helper function to convert GameType ID to Fee
+func convertGameTypeIDToFee(gameTypeID int) int {
+	switch gameTypeID {
+	case 1:
+		return 10
+	case 2:
+		return 20
+	case 3:
+		return 40
+	case 4:
+		return 50
+	case 5:
+		return 100
+	case 6:
+		return 200
+	default:
+		// Handle invalid ID - could log error or use default
+		// For now, return the original ID as fallback
+		return gameTypeID
 	}
 }
 
@@ -111,7 +143,7 @@ func processWaitingGames(ctx context.Context, pool *pgxpool.Pool) ([]gameInfo, e
 		}
 
 		// only start if more than one player joined
-		if count > 1 {
+		if count > 0 {
 			if _, err := tx.Exec(ctx, `
                 UPDATE games
                 SET status = 'started', updated_at = now()

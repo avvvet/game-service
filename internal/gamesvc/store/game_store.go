@@ -18,6 +18,35 @@ func NewGameStore(db *pgxpool.Pool) *GameStore {
 	return &GameStore{db: db}
 }
 
+func (s *GameStore) GetGameByID(ctx context.Context, gameID int) (*models.Game, error) {
+	query := `
+		SELECT id, game_no, game_type_id, user_id, tot_priz, status, created_at, updated_at
+		FROM games
+		WHERE id = $1
+	`
+
+	game := &models.Game{}
+	err := s.db.QueryRow(ctx, query, gameID).Scan(
+		&game.ID,
+		&game.GameNo,
+		&game.GameTypeID,
+		&game.UserID,
+		&game.TotPrize,
+		&game.Status,
+		&game.CreatedAt,
+		&game.UpdatedAt,
+	)
+
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil // Game not found
+		}
+		return nil, fmt.Errorf("failed to get game by ID: %w", err)
+	}
+
+	return game, nil
+}
+
 // GetGameByTypeAndStatus retrieves a game based on the game type ID and status
 func (s *GameStore) GetGameByTypeAndStatus(ctx context.Context, gameTypeID int, status string) (*models.Game, error) {
 	// SQL query to find a game by game_type_id and status

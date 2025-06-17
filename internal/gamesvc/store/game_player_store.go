@@ -20,6 +20,36 @@ func NewGamePlayerStore(db *pgxpool.Pool) *GamePlayerStore {
 	return &GamePlayerStore{db: db}
 }
 
+func (s *GamePlayerStore) GetActiveGameForUser(ctx context.Context, userID int64) (*models.GamePlayer, error) {
+	query := `
+		SELECT gp.id, gp.game_id, gp.user_id, gp.card_sn, gp.status, gp.created_at, gp.updated_at
+		FROM game_players gp
+		INNER JOIN games g ON gp.game_id = g.id
+		WHERE gp.user_id = $1 AND g.status = 'started'
+		LIMIT 1
+	`
+
+	var gp models.GamePlayer
+	err := s.db.QueryRow(ctx, query, userID).Scan(
+		&gp.ID,
+		&gp.GameID,
+		&gp.UserID,
+		&gp.CardSN,
+		&gp.Status,
+		&gp.CreatedAt,
+		&gp.UpdatedAt,
+	)
+
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil // No active game found, not an error
+		}
+		return nil, fmt.Errorf("failed to query active game for user %d: %w", userID, err)
+	}
+
+	return &gp, nil
+}
+
 func (s *GamePlayerStore) GetPlayersByGameID(ctx context.Context, gameID int) ([]*models.GamePlayer, error) {
 	query := `
 		SELECT id, game_id, user_id, card_sn, status, created_at, updated_at
@@ -203,4 +233,69 @@ RETURNING id, game_id, user_id, card_sn, status, created_at, updated_at;
 	}
 
 	return gp, nil
+}
+
+func (s *GamePlayerStore) DeleteGamePlayerCard(ctx context.Context, gameID int, userID int64) error {
+	// Start a transaction to ensure data consistency
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// First, check if the game exists and is in "waiting" status
+	var gameStatus string
+	checkGameQuery := `
+		SELECT status
+		FROM games
+		WHERE id = $1`
+	err = tx.QueryRow(ctx, checkGameQuery, gameID).Scan(&gameStatus)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("game with ID %d not found", gameID)
+		}
+		return fmt.Errorf("failed to check game status: %w", err)
+	}
+
+	// Check if game is in waiting status (only allow cancellation in waiting status)
+	if gameStatus != "waiting" {
+		return fmt.Errorf("cannot cancel card selection, game status is: %s", gameStatus)
+	}
+
+	// Check if user has a card in this game
+	var existingPlayerID int
+	var cardSN string
+	checkUserQuery := `
+		SELECT id, card_sn
+		FROM game_players
+		WHERE game_id = $1 AND user_id = $2`
+	err = tx.QueryRow(ctx, checkUserQuery, gameID, userID).Scan(&existingPlayerID, &cardSN)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("user %d has no card selected in game %d", userID, gameID)
+		}
+		return fmt.Errorf("failed to check user's card in game: %w", err)
+	}
+
+	// Delete the game player record
+	deleteQuery := `
+		DELETE FROM game_players
+		WHERE game_id = $1 AND user_id = $2`
+	result, err := tx.Exec(ctx, deleteQuery, gameID, userID)
+	if err != nil {
+		return fmt.Errorf("failed to delete game player: %w", err)
+	}
+
+	// Check if the deletion was successful
+	rowsAffected := result.RowsAffected()
+	if rowsAffected == 0 {
+		return fmt.Errorf("no card found to cancel for user %d in game %d", userID, gameID)
+	}
+
+	// Commit the transaction
+	if err = tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	return nil
 }

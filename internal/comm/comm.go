@@ -2,56 +2,15 @@ package comm
 
 import (
 	"encoding/json"
-	"time"
 
 	"github.com/avvvet/bingo-services/internal/gamesvc/models"
+	"github.com/shopspring/decimal"
 )
 
 type WSMessage struct {
 	Type     string          `json:"type"` // e.g. "init", "select_card"
 	Data     json.RawMessage `json:"data"`
 	SocketId string          `json:"socketid"`
-}
-
-type MediaControl struct {
-	Media   string `json:"media"` // audio or video
-	Enabled bool   `json:"enabled"`
-}
-
-type SimulcastLayer struct {
-	RID string `json:"rid"` // q, h, f
-}
-
-type RelayRegistration struct {
-	ID     string `json:"id"`
-	Status string `json:"status"`
-}
-
-type ServiceHeartbeat struct {
-	ID        string    `json:"id"` // service id
-	Timestamp time.Time `json:"timestamp"`
-}
-
-type ServiceShutdown struct {
-	ID string `json:"id"` // service id
-}
-
-type UserData struct {
-	UserId        string `json:"userid"`
-	UserName      string `json:"username"`
-	Audio         bool   `json:"audio"`
-	Video         bool   `json:"video"`
-	SocketId      string `json:"socketid"`
-	IsActiveTrack bool   `json:"activetrack"`
-}
-
-type RoomNotification struct {
-	RoomId   string     `json:"roomid"`
-	SocketId string     `json:"socketid"`
-	StreamId string     `json:"streamid"` // this is streamid to be removed from the client UI
-	UserData []UserData `json:"users"`    // users in a room
-	Type     string     `json:"type"`
-	Name     string     `json:"name"` // user name or public name
 }
 
 type PlayerData struct {
@@ -61,7 +20,17 @@ type PlayerData struct {
 }
 
 type DepositeRes struct {
-	Status string `json:"status"` // sucess, faild
+	Status    string `json:"status"` // sucess, faild
+	Timestamp int64  `json:"timestamp"`
+}
+
+type Res struct {
+	Status bool `json:"status"` // sucess, faild
+}
+
+type BalanceStatus struct {
+	Status    bool  `json:"status"`    // available true, insufficient false
+	Timestamp int64 `json:"timestamp"` // Unix timestamp in milliseconds
 }
 
 type WinData struct {
@@ -78,6 +47,7 @@ type GameData struct {
 	Players []*models.GamePlayer `json:"players"`
 	Gtype   int                  `json:"gtype"`
 	Gid     int                  `json:"game_id"`
+	Card    *GameCard            `json:"card,omitempty"`
 }
 
 type GameCard struct {
@@ -102,4 +72,22 @@ type CallMessage struct {
 type PaymentRequest struct {
 	UserID    int64  `json:"userId"`
 	Reference string `json:"referenceNumber"`
+}
+
+type WithdrawalRequest struct {
+	UserID      int64           `json:"userId"`
+	Amount      decimal.Decimal `json:"amount"`
+	AccountType string          `json:"accountType"`
+	AccountNo   string          `json:"accountNo"`
+	Name        string          `json:"name"`
+}
+
+type WithdrawalRes struct {
+	Status       string          `json:"status"`
+	WithdrawalID int64           `json:"withdrawalId,omitempty"`
+	Amount       decimal.Decimal `json:"amount,omitempty"`
+	AccountType  string          `json:"accountType,omitempty"`
+	AccountNo    string          `json:"accountNo,omitempty"`
+	Name         string          `json:"name,omitempty"`
+	Timestamp    int64           `json:"timestamp"` // Unix timestamp in milliseconds
 }

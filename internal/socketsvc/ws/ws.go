@@ -30,12 +30,16 @@ func (s *Ws) SocketMessage(socketId string, message *comm.WSMessage) {
 		s.getBalance(socketId, message)
 	case "get-wait-game":
 		s.getWaitGame(socketId, message)
-	case "player-select-card":
+	case "check-active-game":
+		s.checkActiveGame(socketId, message)
+	case "player-select-card", "player-cancel-card":
 		s.selectCard(socketId, message)
 	case "claim-bingo":
 		s.claimBingo(socketId, message)
 	case "deposite":
 		s.deposite(socketId, message)
+	case "withdrawal":
+		s.withdrawal(socketId, message)
 	default:
 		log.Warnf("unknown event received: %s", message.Type)
 	}
@@ -101,13 +105,59 @@ func (s *Ws) deposite(socketId string, msg *comm.WSMessage) {
 	}
 
 	// Publish and it will be picked by pay service
-	topic := "payment.request"
+	topic := "payment.service"
 	if err := s.Broker.Publish(topic, bytes); err != nil {
 		log.Errorf("Failed to publish to NATS topic %s: %v", topic, err)
 		return
 	}
 
-	log.Infof("Published [payment.request] message for user %d to topic %s", payload.UserID, topic)
+	log.Infof("Published [payment.service] message for user %d to topic %s", payload.UserID, topic)
+}
+
+func (s *Ws) withdrawal(socketId string, msg *comm.WSMessage) {
+	var payload struct {
+		UserID      int64   `json:"userId"`
+		Amount      float64 `json:"amount"`
+		AccountType string  `json:"accountType"`
+		AccountNo   string  `json:"accountNo"`
+		Name        string  `json:"name"`
+	}
+	if err := json.Unmarshal(msg.Data, &payload); err != nil {
+		log.Errorf("Error: invalid withdrawal payload %s", err)
+		return
+	}
+
+	if payload.UserID == 0 || payload.Amount <= 0 || payload.AccountType == "" || payload.AccountNo == "" || payload.Name == "" {
+		log.Error("Invalid [withdrawal] payload: missing required fields")
+		return
+	}
+
+	// Validate account type
+	validAccountTypes := map[string]bool{
+		"cbe":       true,
+		"abyssinia": true,
+		"telebirr":  true,
+	}
+	if !validAccountTypes[payload.AccountType] {
+		log.Error("Invalid [withdrawal] payload: invalid account type")
+		return
+	}
+
+	msg.SocketId = socketId
+	// Marshal message for NATS
+	bytes, err := json.Marshal(msg)
+	if err != nil {
+		log.Errorf("Failed to marshal WSMessage for NATS: %v", err)
+		return
+	}
+	// Publish and it will be picked by pay service
+	topic := "payment.service"
+	if err := s.Broker.Publish(topic, bytes); err != nil {
+		log.Errorf("Failed to publish to NATS topic %s: %v", topic, err)
+		return
+	}
+	log.Infof("Published [payment.service] withdrawal message for user %d (amount: %.2f, account: %s) to topic %s",
+		payload.UserID, payload.Amount, payload.AccountType, topic)
 }
 
 func (s *Ws) claimBingo(socketId string, msg *comm.WSMessage) {
@@ -156,11 +206,6 @@ func (s *Ws) selectCard(socketId string, msg *comm.WSMessage) {
 
 	if err := json.Unmarshal(msg.Data, &payload); err != nil {
 		log.Errorf("Error: invalid selectCard payload %s", err)
-		return
-	}
-
-	if msg.Type != "player-select-card" {
-		log.Errorf("Invalid message type for [selectCard] handler: %s", msg.Type)
 		return
 	}
 
@@ -218,7 +263,7 @@ func (s *Ws) getWaitGame(socketId string, msg *comm.WSMessage) {
 	so := s.Broker.GameRooms
 
 	for a, b := range so {
-		fmt.Printf("game type %d  count socket %d", a, len(b))
+		fmt.Printf("game type -> %d  count socket %d\n", a, len(b))
 	}
 
 	// Update message with socket ID
@@ -239,6 +284,57 @@ func (s *Ws) getWaitGame(socketId string, msg *comm.WSMessage) {
 	}
 
 	log.Infof("Published get_wait_game message for user %d to topic %s", payload.UserId, topic)
+}
+
+func (s *Ws) checkActiveGame(socketId string, msg *comm.WSMessage) {
+	var payload struct {
+		UserId int64 `json:"user_id"`
+	}
+
+	if err := json.Unmarshal(msg.Data, &payload); err != nil {
+		log.Errorf("Error: invalid_get_wait_game payload %s", err)
+		return
+	}
+
+	if msg.Type != "check-active-game" {
+		log.Errorf("Invalid message type for get_wait_game handler: %s", msg.Type)
+		return
+	}
+
+	if payload.UserId == 0 {
+		log.Error("Invalid get_wait_game payload: missing required user fields")
+		return
+	}
+
+	// for socket grouping per game type
+	staticGameTypes := []int{10, 20, 40, 50, 100, 200}
+	if !contains(s.Broker.GameRooms[staticGameTypes[0]], socketId) { // to check if previously this socket to any of the gametype rooms
+		s.Broker.Mu.Lock()
+		for _, gtype := range staticGameTypes {
+			s.Broker.GameRooms[gtype] = append(s.Broker.GameRooms[gtype], socketId)
+		}
+
+		s.Broker.Mu.Unlock()
+	}
+
+	// Update message with socket ID
+	msg.SocketId = socketId
+
+	// Marshal message for NATS
+	bytes, err := json.Marshal(msg)
+	if err != nil {
+		log.Errorf("Failed to marshal WSMessage for NATS: %v", err)
+		return
+	}
+
+	// Publish to game service
+	topic := "socket.service"
+	if err := s.Broker.Publish(topic, bytes); err != nil {
+		log.Errorf("Failed to publish to NATS topic %s: %v", topic, err)
+		return
+	}
+
+	log.Infof("Published get_active_game message for user %d to topic %s", payload.UserId, topic)
 }
 
 func (s *Ws) handleInit(socketId string, msg *comm.WSMessage) {
@@ -327,46 +423,11 @@ func (s *Ws) GetRoomSockets(roomId string) ([]string, bool) {
 	return sockets, found
 }
 
-func (s *Ws) GetService(roomId string) string {
-	// Check if a relay service is already assigned to the roomId
-	relayServiceId, ok := s.Broker.RoomToRelayMap.Load(roomId)
-	if !ok {
-		// No relay service assigned, so use round-robin to select one
-		var selectedRelayServiceId string
-
-		s.Broker.RRmtx.Lock()
-		defer s.Broker.RRmtx.Unlock()
-
-		// Get available relay services
-		count := 0
-		s.Broker.RelayMap.Range(func(key, value any) bool {
-			if count == s.Broker.RoundRobinIndex {
-				selectedRelayServiceId = key.(string)
-				s.Broker.RoundRobinIndex = (s.Broker.RoundRobinIndex + 1) % s.getRelayServiceCount()
-				return false // Stop iteration
-			}
-			count++
-			return true // Continue iteration
-		})
-
-		// Assign the selected relay service to the roomId
-		if selectedRelayServiceId != "" {
-			s.Broker.RoomToRelayMap.Store(roomId, selectedRelayServiceId)
-			return selectedRelayServiceId
+func contains(slice []string, val string) bool {
+	for _, item := range slice {
+		if item == val {
+			return true
 		}
-
-		return "" // No available relay service found
 	}
-
-	// Return the existing assigned relay service ID
-	return relayServiceId.(string)
-}
-
-func (s *Ws) getRelayServiceCount() int {
-	count := 0
-	s.Broker.RelayMap.Range(func(key, value any) bool {
-		count++
-		return true
-	})
-	return count
+	return false
 }

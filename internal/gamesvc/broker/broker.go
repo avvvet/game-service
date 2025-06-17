@@ -9,6 +9,7 @@ import (
 	"github.com/avvvet/bingo-services/internal/gamesvc/models"
 	"github.com/avvvet/bingo-services/internal/gamesvc/service"
 	"github.com/nats-io/nats.go"
+	"github.com/shopspring/decimal"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -96,7 +97,62 @@ func (b *Broker) handleMessage(msgNat *nats.Msg) {
 		}
 
 		b.PublishBalance(playerData, msg.SocketId)
+	case "check-active-game":
+		var request struct {
+			UserId int64 `json:"user_id"`
+		}
 
+		err := json.Unmarshal(msg.Data, &request)
+		if err != nil {
+			log.Errorf("Error decoding request: %s", err)
+			break
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		activeGamePlayer, err := b.GamePlayerService.GetActiveGameForUser(ctx, request.UserId)
+		if err != nil {
+			log.Errorf("Error checking active game for user %d: %s", request.UserId, err)
+			break
+		}
+
+		if activeGamePlayer != nil {
+			// Fetch the game
+			game, err := b.GameService.GetGameByID(ctx, int(activeGamePlayer.GameID))
+			if err != nil {
+				log.Errorf("Error retrieving game: %s", err)
+				break
+			}
+
+			// Fetch the game players
+			players, err := b.GamePlayerService.GetGamePlayers(ctx, int(activeGamePlayer.GameID))
+			if err != nil {
+				log.Errorf("Error retrieving players: %s", err)
+				break
+			}
+
+			// Fetch the player's card
+			gameCard, err := b.CardService.GetCardBySN(ctx, activeGamePlayer.CardSN)
+			if err != nil {
+				log.Errorf("Error retrieving card by SN: %s", err)
+				break
+			}
+
+			card := comm.GameCard{
+				CardSN: gameCard.CardSN,
+				Data:   gameCard.Data,
+			}
+
+			gameData := comm.GameData{
+				Gid:     int(game.ID),
+				Game:    game,
+				Players: players,
+				Card:    &card,
+			}
+
+			b.PublishActiveGameResponse(gameData, msg.SocketId)
+		}
 	case "get-wait-game":
 		var request struct {
 			UserId int64 `json:"user_id"`
@@ -113,12 +169,12 @@ func (b *Broker) handleMessage(msgNat *nats.Msg) {
 		defer cancel()
 
 		//get a game for game type
-		game, err := b.GameService.GetGameByTypeAndStatus(ctx, request.Gtype, "waiting")
+		game, err := b.GameService.GetGameByFeeAndStatus(ctx, request.Gtype, "waiting")
 		if err != nil {
 			log.Errorf("Error [UserService.GetOrCreateUser] %s", err)
 		}
 
-		//get a game for game type
+		//get players
 		players, err := b.GamePlayerService.GetGamePlayers(ctx, int(game.ID))
 		if err != nil {
 			log.Errorf("Error [UserService.GetOrCreateUser] %s", err)
@@ -132,6 +188,7 @@ func (b *Broker) handleMessage(msgNat *nats.Msg) {
 
 		b.PublishWaitGameResponse(gameData, msg.SocketId)
 	case "player-select-card":
+
 		var request struct {
 			UserId int64  `json:"user_id"`
 			GameId int    `json:"game_id"`
@@ -141,16 +198,37 @@ func (b *Broker) handleMessage(msgNat *nats.Msg) {
 
 		err := json.Unmarshal(msg.Data, &request)
 		if err != nil {
-			log.Errorf("Error %s", err)
+			log.Errorf("Error unmarshalling player-select-card: %s", err)
+			return
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		//create game player if card is available
+		// 1. Check user balance before proceeding
+		balance, err := b.BalanceService.GetUserBalance(ctx, request.UserId)
+		if err != nil {
+			log.Errorf("Error [BalanceService.GetUserBalance]: %s", err)
+			return
+		}
+
+		if balance.LessThan(decimal.NewFromInt(10)) {
+			log.Infof("User %d has insufficient balance: %s", request.UserId, balance.StringFixed(2))
+
+			// Publish insufficient balance response
+			resp := comm.BalanceStatus{
+				Status:    false,
+				Timestamp: time.Now().UnixMilli(),
+			}
+
+			b.PublishInsufficientBalance(resp, msg.SocketId)
+			return
+		}
+
+		// 2. Proceed to create game player if card is available
 		gamePlayer, err := b.GamePlayerService.CreateGamePlayerIfAvailable(ctx, request.GameId, request.UserId, request.CardSN)
 		if err != nil {
-			log.Errorf("Error [GamePlayerService.CreateGamePlayerIfAvailable] %s", err)
+			log.Errorf("Error [GamePlayerService.CreateGamePlayerIfAvailable]: %s", err)
 			return
 		}
 
@@ -158,18 +236,15 @@ func (b *Broker) handleMessage(msgNat *nats.Msg) {
 			return
 		}
 
-		// lets send new data
-
-		//get a game for game type
-		game, err := b.GameService.GetGameByTypeAndStatus(ctx, request.Gtype, "waiting")
+		// 3. Get updated game and players info Gtype is fee and it will be converted to game type id
+		game, err := b.GameService.GetGameByFeeAndStatus(ctx, request.Gtype, "waiting")
 		if err != nil {
-			log.Errorf("Error [GameService.GetGameByTypeAndStatus] %s", err)
+			log.Errorf("Error [GameService.GetGameByFeeAndStatus]: %s", err)
 		}
 
-		//get a game players
 		players, err := b.GamePlayerService.GetGamePlayers(ctx, int(request.GameId))
 		if err != nil {
-			log.Errorf("Error [GamePlayerService.GetGamePlayers] %s", err)
+			log.Errorf("Error [GamePlayerService.GetGamePlayers]: %s", err)
 		}
 
 		gameData := comm.GameData{
@@ -178,21 +253,48 @@ func (b *Broker) handleMessage(msgNat *nats.Msg) {
 			Gtype:   request.Gtype,
 			Gid:     request.GameId,
 		}
-		// broadcast to all game type group
 		b.PublishWaitGameResponseToAll(gameData, msg.SocketId)
 
-		//get game type by card SN
+		// 4. Publish the selected card detail to the player
 		gameCard, err := b.CardService.GetCardBySN(ctx, gamePlayer.CardSN)
 		if err != nil {
-			log.Errorf("Error [GamePlayerService.GetGamePlayers] %s", err)
+			log.Errorf("Error [CardService.GetCardBySN]: %s", err)
 		}
 
 		card := comm.GameCard{
 			CardSN: gameCard.CardSN,
 			Data:   gameCard.Data,
 		}
-		//send to the player selected card detail
 		b.PublishSelectCardResponse(card, msg.SocketId)
+
+	case "player-cancel-card":
+
+		var request struct {
+			UserId int64 `json:"user_id"`
+			GameId int   `json:"game_id"`
+			Gtype  int   `json:"gtype"`
+		}
+
+		err := json.Unmarshal(msg.Data, &request)
+		if err != nil {
+			log.Errorf("Error unmarshalling player-select-card: %s", err)
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		err = b.GamePlayerService.DeleteGamePlayerCard(ctx, request.GameId, request.UserId)
+		if err != nil {
+			log.Errorf("Error DeleteGamePlayerCard: %s", err)
+			return
+		}
+
+		r := comm.Res{
+			Status: true,
+		}
+
+		b.CancelCardResponse(r, msg.SocketId)
 	default:
 		log.Error("Unknown message")
 		return
@@ -242,6 +344,48 @@ func (b *Broker) PublishSelectCardResponse(p comm.GameCard, socketId string) {
 	b.Publish(topic, payload)
 }
 
+func (b *Broker) CancelCardResponse(p comm.Res, socketId string) {
+	data, err := json.Marshal(p)
+	if err != nil {
+		log.Errorf("PublishDeleteCardResponse unable to marsahl playerData")
+	}
+
+	msg := &comm.WSMessage{
+		Type:     "player-cancel-card-response",
+		Data:     data,
+		SocketId: socketId,
+	}
+
+	payload, err := json.Marshal(msg)
+	if err != nil {
+		log.Errorf("Error %s", err)
+	}
+
+	topic := "game.service"
+	b.Publish(topic, payload)
+}
+
+func (b *Broker) PublishInsufficientBalance(p comm.BalanceStatus, socketId string) {
+	data, err := json.Marshal(p)
+	if err != nil {
+		log.Errorf("[insufficient_balance] unable to marsahl playerData")
+	}
+
+	msg := &comm.WSMessage{
+		Type:     "insufficient-balance-response",
+		Data:     data,
+		SocketId: socketId,
+	}
+
+	payload, err := json.Marshal(msg)
+	if err != nil {
+		log.Errorf("Error %s", err)
+	}
+
+	topic := "game.service"
+	b.Publish(topic, payload)
+}
+
 func (b *Broker) PublishInitResponse(p comm.PlayerData, socketId string) {
 	data, err := json.Marshal(p)
 	if err != nil {
@@ -271,6 +415,27 @@ func (b *Broker) PublishWaitGameResponse(gdata comm.GameData, socketId string) {
 
 	msg := &comm.WSMessage{
 		Type:     "get-wait-game-response",
+		Data:     data,
+		SocketId: socketId,
+	}
+
+	payload, err := json.Marshal(msg)
+	if err != nil {
+		log.Errorf("Error %s", err)
+	}
+
+	topic := "game.service"
+	b.Publish(topic, payload)
+}
+
+func (b *Broker) PublishActiveGameResponse(gdata comm.GameData, socketId string) {
+	data, err := json.Marshal(gdata)
+	if err != nil {
+		log.Errorf("error [PublishActiveGameResponse] unable to marsahl game data %d %s", gdata.Game.ID, socketId)
+	}
+
+	msg := &comm.WSMessage{
+		Type:     "check-active-game-response",
 		Data:     data,
 		SocketId: socketId,
 	}

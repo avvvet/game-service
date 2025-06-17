@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"regexp"
@@ -19,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/ledongthuc/pdf"
 	"github.com/nats-io/nats.go"
+	"github.com/shopspring/decimal"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -50,6 +52,17 @@ type PaymentInfo struct {
 	PaymentDate string
 }
 
+type WithdrawalRequest struct {
+	ID              int64           `json:"id"`
+	UserID          int64           `json:"user_id"`
+	Amount          decimal.Decimal `json:"amount"`
+	BalanceSnapshot decimal.Decimal `json:"balance_snapshot"`
+	AccountType     string          `json:"account_type"`
+	AccountNo       string          `json:"account_no"`
+	Name            string          `json:"name"`
+	Status          string          `json:"status"`
+}
+
 func main() {
 	// pg connection
 	dbpool, err := db.Connect()
@@ -67,29 +80,36 @@ func main() {
 	defer nc.Conn.Close()
 	log.Infof("NATS connected at %s", nc.Url)
 
-	// Subscribe to incoming payment requests
-	_, err = nc.Conn.Subscribe("payment.request", func(m *nats.Msg) {
-		handlePayment(nc, dbpool, m)
+	// Subscribe to payment service
+	_, err = nc.Conn.Subscribe("payment.service", func(m *nats.Msg) {
+		handlePaymentService(nc, dbpool, m)
 	})
 	if err != nil {
-		log.Fatalf("Subscribe payment.request error: %v", err)
+		log.Fatalf("Subscribe payment.service error: %v", err)
 	}
 
 	select {}
 }
 
-func handlePayment(nc *natscli.Nats, pool *pgxpool.Pool, msg *nats.Msg) {
-
+func handlePaymentService(nc *natscli.Nats, pool *pgxpool.Pool, msg *nats.Msg) {
 	// Decode wrapper
 	var ws comm.WSMessage
 	if err := json.Unmarshal(msg.Data, &ws); err != nil {
 		log.Errorf("invalid WSMessage: %v", err)
 		return
 	}
-	if ws.Type != "deposite" {
-		return
-	}
 
+	switch ws.Type {
+	case "deposite":
+		handleDeposit(nc, pool, ws)
+	case "withdrawal":
+		handleWithdrawal(nc, pool, ws)
+	default:
+		log.Warnf("unknown message type: %s", ws.Type)
+	}
+}
+
+func handleDeposit(nc *natscli.Nats, pool *pgxpool.Pool, ws comm.WSMessage) {
 	// Decode request
 	var req comm.PaymentRequest
 	if err := json.Unmarshal(ws.Data, &req); err != nil {
@@ -101,18 +121,20 @@ func handlePayment(nc *natscli.Nats, pool *pgxpool.Pool, msg *nats.Msg) {
 	info, err := fetchPaymentInfo(strings.ToUpper(req.Reference))
 	if err != nil {
 		res := comm.DepositeRes{
-			Status: "error",
+			Status:    "error",
+			Timestamp: time.Now().Unix(),
 		}
 		PublishDepositeRes(nc, res, ws.SocketId)
 		return
 	}
 
 	// Validate receiver
-	const expectedReceiver = "AWET TSEGAZEAB GEBREAMLAK"
+	const expectedReceiver = "SABA TSEGAYE BEKELE" //"AWET TSEGAZEAB GEBREAMLAK"
 	if info.Receiver != expectedReceiver {
 
 		res := comm.DepositeRes{
-			Status: "invalid-receiver",
+			Status:    "invalid-receiver",
+			Timestamp: time.Now().Unix(),
 		}
 		PublishDepositeRes(nc, res, ws.SocketId)
 		return
@@ -125,7 +147,8 @@ func handlePayment(nc *natscli.Nats, pool *pgxpool.Pool, msg *nats.Msg) {
 	if err != nil {
 		log.Errorf("begin tx: %v", err)
 		res := comm.DepositeRes{
-			Status: "error",
+			Status:    "error",
+			Timestamp: time.Now().Unix(),
 		}
 		PublishDepositeRes(nc, res, ws.SocketId)
 		return
@@ -142,14 +165,16 @@ func handlePayment(nc *natscli.Nats, pool *pgxpool.Pool, msg *nats.Msg) {
 		log.Errorf("idempotency check error: %v", err)
 
 		res := comm.DepositeRes{
-			Status: "error",
+			Status:    "error",
+			Timestamp: time.Now().Unix(),
 		}
 		PublishDepositeRes(nc, res, ws.SocketId)
 		return
 	}
 	if exists {
 		res := comm.DepositeRes{
-			Status: "duplicate",
+			Status:    "duplicate",
+			Timestamp: time.Now().Unix(),
 		}
 		PublishDepositeRes(nc, res, ws.SocketId)
 		return
@@ -164,7 +189,8 @@ func handlePayment(nc *natscli.Nats, pool *pgxpool.Pool, msg *nats.Msg) {
 		log.Errorf("insert balance error: %v", err)
 
 		res := comm.DepositeRes{
-			Status: "error",
+			Status:    "error",
+			Timestamp: time.Now().Unix(),
 		}
 		PublishDepositeRes(nc, res, ws.SocketId)
 		return
@@ -175,7 +201,8 @@ func handlePayment(nc *natscli.Nats, pool *pgxpool.Pool, msg *nats.Msg) {
 		log.Errorf("commit tx: %v", err)
 
 		res := comm.DepositeRes{
-			Status: "error",
+			Status:    "error",
+			Timestamp: time.Now().Unix(),
 		}
 		PublishDepositeRes(nc, res, ws.SocketId)
 		return
@@ -183,9 +210,53 @@ func handlePayment(nc *natscli.Nats, pool *pgxpool.Pool, msg *nats.Msg) {
 
 	// Build and publish win data
 	res := comm.DepositeRes{
-		Status: "success",
+		Status:    "success",
+		Timestamp: time.Now().Unix(),
 	}
 	PublishDepositeRes(nc, res, ws.SocketId)
+}
+
+func handleWithdrawal(nc *natscli.Nats, pool *pgxpool.Pool, ws comm.WSMessage) {
+	// Decode withdrawal request
+	var req comm.WithdrawalRequest
+	if err := json.Unmarshal(ws.Data, &req); err != nil {
+		log.Errorf("invalid WithdrawalRequest: %v", err)
+		publishWithdrawalRes(nc, comm.WithdrawalRes{Status: "error", Timestamp: time.Now().UnixMilli()}, ws.SocketId)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// Create withdrawal request
+	withdrawalReq, err := createWithdrawalRequest(
+		ctx, pool, req.UserID, req.Amount,
+		req.AccountType, req.AccountNo, req.Name,
+	)
+
+	if err != nil {
+		log.Errorf("create withdrawal request error: %v", err)
+		status := "error"
+		if strings.Contains(err.Error(), "insufficient balance") {
+			status = "insufficient-balance"
+		} else if strings.Contains(err.Error(), "pending withdrawal request") {
+			status = "pending-request-exists"
+		}
+		publishWithdrawalRes(nc, comm.WithdrawalRes{Status: status, Timestamp: time.Now().UnixMilli()}, ws.SocketId)
+		return
+	}
+
+	// Build and publish response
+	res := comm.WithdrawalRes{
+		Status:       "success",
+		WithdrawalID: withdrawalReq.ID,
+		Amount:       withdrawalReq.Amount,
+		AccountType:  withdrawalReq.AccountType,
+		AccountNo:    withdrawalReq.AccountNo,
+		Name:         withdrawalReq.Name,
+		Timestamp:    time.Now().UnixMilli(),
+	}
+	publishWithdrawalRes(nc, res, ws.SocketId)
 }
 
 func PublishDepositeRes(n *natscli.Nats, p comm.DepositeRes, socketId string) {
@@ -203,6 +274,28 @@ func PublishDepositeRes(n *natscli.Nats, p comm.DepositeRes, socketId string) {
 	payload, err := json.Marshal(msg)
 	if err != nil {
 		log.Errorf("Error %s", err)
+	}
+
+	n.Conn.Publish("game.service", payload)
+}
+
+func publishWithdrawalRes(n *natscli.Nats, p comm.WithdrawalRes, socketId string) {
+	data, err := json.Marshal(p)
+	if err != nil {
+		log.Errorf("unable to marshal withdrawal response: %v", err)
+		return
+	}
+
+	msg := &comm.WSMessage{
+		Type:     "withdrawal-res",
+		Data:     data,
+		SocketId: socketId,
+	}
+
+	payload, err := json.Marshal(msg)
+	if err != nil {
+		log.Errorf("Error marshaling WSMessage: %v", err)
+		return
 	}
 
 	n.Conn.Publish("game.service", payload)
@@ -305,4 +398,97 @@ func parseFields(text string) (receiver string, totalAmt float64, paymentDate st
 		}
 	}
 	return
+}
+
+func createWithdrawalRequest(ctx context.Context, pool *pgxpool.Pool, userID int64, amount decimal.Decimal, accountType, accountNo, name string) (*WithdrawalRequest, error) {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Lock balance records first, then calculate totals
+	rows, err := tx.Query(ctx, `
+		SELECT dr, cr
+		FROM balances
+		WHERE user_id = $1 AND status = 'verified'
+		FOR UPDATE
+	`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("lock balance records: %w", err)
+	}
+	defer rows.Close()
+
+	var totalDr, totalCr decimal.Decimal
+	for rows.Next() {
+		var dr, cr decimal.Decimal
+		if err := rows.Scan(&dr, &cr); err != nil {
+			return nil, fmt.Errorf("scan balance row: %w", err)
+		}
+		totalDr = totalDr.Add(dr)
+		totalCr = totalCr.Add(cr)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows error: %w", err)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get user balance: %w", err)
+	}
+
+	balance := totalDr.Sub(totalCr)
+
+	// Check if user has sufficient balance
+	if balance.LessThan(amount) {
+		return nil, fmt.Errorf("insufficient balance: have %s, need %s", balance.String(), amount.String())
+	}
+
+	// Check if user has any pending withdrawal requests
+	var pendingCount int
+	err = tx.QueryRow(ctx, `
+		SELECT COUNT(*)
+		FROM withdrawal_requests
+		WHERE user_id = $1 AND status = 'pending'
+	`, userID).Scan(&pendingCount)
+	if err != nil {
+		return nil, fmt.Errorf("check pending requests: %w", err)
+	}
+
+	if pendingCount > 0 {
+		return nil, fmt.Errorf("user already has a pending withdrawal request")
+	}
+
+	// Insert withdrawal request
+	var withdrawalID int64
+	err = tx.QueryRow(ctx, `
+		INSERT INTO withdrawal_requests (
+			user_id,
+			amount,
+			balance_snapshot,
+			account_type,
+			account_no,
+			name,
+			status,
+			created_at,
+			updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, 'pending', now(), now())
+		RETURNING id
+	`, userID, amount, balance, accountType, accountNo, name).Scan(&withdrawalID)
+	if err != nil {
+		return nil, fmt.Errorf("insert withdrawal request: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit tx: %w", err)
+	}
+
+	return &WithdrawalRequest{
+		ID:              withdrawalID,
+		UserID:          userID,
+		Amount:          amount,
+		BalanceSnapshot: balance,
+		AccountType:     accountType,
+		AccountNo:       accountNo,
+		Name:            name,
+		Status:          "pending",
+	}, nil
 }
