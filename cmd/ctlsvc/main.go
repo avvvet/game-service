@@ -108,14 +108,25 @@ func processWaitingGames(ctx context.Context, pool *pgxpool.Pool) ([]gameInfo, e
 		return nil, fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback(ctx)
+	/*
+	   	rows, err := tx.Query(ctx, `
+	           SELECT id, game_type_id, tot_priz, game_no
+	           FROM games
+	           WHERE status = 'waiting'
+	             AND created_at < now() - interval '30 seconds'
+	           FOR UPDATE SKIP LOCKED
+	       `)
+
+	*/
 
 	rows, err := tx.Query(ctx, `
-        SELECT id, game_type_id, tot_priz, game_no
-        FROM games
-        WHERE status = 'waiting'
-          AND created_at < now() - interval '30 seconds'
-        FOR UPDATE SKIP LOCKED
-    `)
+		SELECT id, game_type_id, tot_priz, game_no
+		FROM games
+		WHERE status = 'waiting'
+		AND updated_at < now() - interval '30 seconds'
+		FOR UPDATE SKIP LOCKED
+	`)
+
 	if err != nil {
 		return nil, fmt.Errorf("select waiting games: %w", err)
 	}
@@ -143,7 +154,7 @@ func processWaitingGames(ctx context.Context, pool *pgxpool.Pool) ([]gameInfo, e
 		}
 
 		// only start if more than one player joined
-		if count > 0 {
+		if count > 1 {
 			if _, err := tx.Exec(ctx, `
                 UPDATE games
                 SET status = 'started', updated_at = now()

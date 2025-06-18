@@ -24,7 +24,7 @@ func (s *GameService) GetGameByID(ctx context.Context, gameID int) (*models.Game
 // GetGameByFeeAndStatus accepts a game type fee and converts it to ID
 func (s *GameService) GetGameByFeeAndStatus(ctx context.Context, gameTypeFee int, status string) (*models.Game, error) {
 	// Convert game type fee to ID
-	gameTypeID, err := s.convertFeeToGameTypeID(gameTypeFee)
+	gameTypeID, err := s.ConvertFeeToGameTypeID(gameTypeFee)
 	if err != nil {
 		return nil, err
 	}
@@ -34,7 +34,7 @@ func (s *GameService) GetGameByFeeAndStatus(ctx context.Context, gameTypeFee int
 }
 
 // convertFeeToGameTypeID converts game type fee to corresponding ID
-func (s *GameService) convertFeeToGameTypeID(fee int) (int, error) {
+func (s *GameService) ConvertFeeToGameTypeID(fee int) (int, error) {
 	switch fee {
 	case 10:
 		return 1, nil
@@ -54,7 +54,7 @@ func (s *GameService) convertFeeToGameTypeID(fee int) (int, error) {
 }
 
 // convertGameTypeIDToFee converts game type ID back to fee (for response mapping)
-func (s *GameService) convertGameTypeIDToFee(gameTypeID int) (int, error) {
+func (s *GameService) ConvertGameTypeIDToFee(gameTypeID int) (int, error) {
 	switch gameTypeID {
 	case 1:
 		return 10, nil

@@ -125,7 +125,6 @@ func (s *GamePlayerStore) CreateGamePlayerIfAvailable(ctx context.Context, gameI
 		// Some other error occurred
 		return nil, fmt.Errorf("failed to check existing user in game: %w", err)
 	}
-	// err is sql.ErrNoRows means no record found, which is what we want
 
 	// Check if card is already used in this game
 	var existingCardPlayerID int
@@ -141,7 +140,6 @@ func (s *GamePlayerStore) CreateGamePlayerIfAvailable(ctx context.Context, gameI
 		// Some other error occurred
 		return nil, fmt.Errorf("failed to check existing card in game: %w", err)
 	}
-	// err is sql.ErrNoRows means no record found, which is what we want
 
 	// Create the game player
 	insertQuery := `
@@ -160,6 +158,16 @@ func (s *GamePlayerStore) CreateGamePlayerIfAvailable(ctx context.Context, gameI
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create game player: %w", err)
+	}
+
+	// Update game's updated_at to reset the 30-second timer**
+	updateGameQuery := `
+		UPDATE games 
+		SET updated_at = CURRENT_TIMESTAMP
+		WHERE id = $1 AND status = 'waiting'`
+	_, err = tx.Exec(ctx, updateGameQuery, gameID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to update game timestamp: %w", err)
 	}
 
 	// Commit the transaction

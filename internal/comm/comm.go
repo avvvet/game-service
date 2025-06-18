@@ -22,6 +22,7 @@ type PlayerData struct {
 type DepositeRes struct {
 	Status    string `json:"status"` // sucess, faild
 	Timestamp int64  `json:"timestamp"`
+	Message   string `json:"message"`
 }
 
 type Res struct {
@@ -34,12 +35,13 @@ type BalanceStatus struct {
 }
 
 type WinData struct {
-	Gtype    int    `json:"gtype"`
-	Gid      int    `json:"game_id"`
-	PlayerId int64  `json:"player_id"`
-	Name     string `json:"name"`
-	Avatar   string `json:"avatar"`
-	Marks    []int  `json:"marks"` // winer bing card, it shows how it win
+	Gtype        int     `json:"gtype"`
+	Gid          int     `json:"game_id"`
+	PlayerId     int64   `json:"player_id"`
+	Name         string  `json:"name"`
+	Avatar       string  `json:"avatar"`
+	Marks        []int   `json:"marks"` // winer bing card, it shows how it win
+	WinnerAmount float64 `json:"winner_amount"`
 }
 
 type GameData struct {

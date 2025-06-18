@@ -98,6 +98,7 @@ func (b *Broker) handleMessage(msgNat *nats.Msg) {
 
 		b.PublishBalance(playerData, msg.SocketId)
 	case "check-active-game":
+
 		var request struct {
 			UserId int64 `json:"user_id"`
 		}
@@ -144,11 +145,17 @@ func (b *Broker) handleMessage(msgNat *nats.Msg) {
 				Data:   gameCard.Data,
 			}
 
+			// this for web clients as gametype fee is know example id 1 -> 10, 2 -> 20 etc
+			gameFeeType, err := b.GameService.ConvertGameTypeIDToFee(int(game.GameTypeID))
+			if err != nil {
+				log.Errorf("Error converting ConvertGameTypeIDToFee for game.GameTypeID %v : %s", int(game.GameTypeID), err)
+			}
 			gameData := comm.GameData{
 				Gid:     int(game.ID),
 				Game:    game,
 				Players: players,
 				Card:    &card,
+				Gtype:   gameFeeType,
 			}
 
 			b.PublishActiveGameResponse(gameData, msg.SocketId)
@@ -212,7 +219,8 @@ func (b *Broker) handleMessage(msgNat *nats.Msg) {
 			return
 		}
 
-		if balance.LessThan(decimal.NewFromInt(10)) {
+		gameFee := request.Gtype
+		if balance.LessThan(decimal.NewFromInt(int64(gameFee))) {
 			log.Infof("User %d has insufficient balance: %s", request.UserId, balance.StringFixed(2))
 
 			// Publish insufficient balance response

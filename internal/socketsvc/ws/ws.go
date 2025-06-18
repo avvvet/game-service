@@ -21,8 +21,44 @@ func NewWs() *Ws {
 	return &Ws{}
 }
 
+// HandleDisconnect cleans up all resources associated with a disconnected socket
+func (s *Ws) HandleDisconnect(socketId string) {
+	log.Infof("Cleaning up resources for disconnected socket: %s", socketId)
+
+	// Remove from connection map
+	s.connMap.Delete(socketId)
+
+	// Remove from room map
+	s.roomMap.Delete(socketId)
+
+	// Remove from all game rooms
+	s.Broker.Mu.Lock()
+	for gameType, sockets := range s.Broker.GameRooms {
+		s.Broker.GameRooms[gameType] = removeSocket(sockets, socketId)
+	}
+	s.Broker.Mu.Unlock()
+
+	log.Infof("Successfully cleaned up resources for socket: %s", socketId)
+}
+
+// helper function to remove a socket from a slice
+func removeSocket(sockets []string, socketId string) []string {
+	for i, s := range sockets {
+		if s == socketId {
+			return append(sockets[:i], sockets[i+1:]...)
+		}
+	}
+	return sockets
+}
+
 // handle socket message from web clients
 func (s *Ws) SocketMessage(socketId string, message *comm.WSMessage) {
+	// Validate socket exists
+	if _, exists := s.GetConnection(socketId); !exists {
+		log.Warnf("Message received for non-existent socket: %s", socketId)
+		return
+	}
+
 	switch message.Type {
 	case "init":
 		s.handleInit(socketId, message)
@@ -51,7 +87,7 @@ func (s *Ws) getBalance(socketId string, msg *comm.WSMessage) {
 	}
 
 	if err := json.Unmarshal(msg.Data, &payload); err != nil {
-		log.Errorf("Error: invalid selectCard payload %s", err)
+		log.Errorf("Error: invalid getBalance payload %s", err)
 		return
 	}
 
@@ -86,12 +122,12 @@ func (s *Ws) deposite(socketId string, msg *comm.WSMessage) {
 	}
 
 	if err := json.Unmarshal(msg.Data, &payload); err != nil {
-		log.Errorf("Error: invalid selectCard payload %s", err)
+		log.Errorf("Error: invalid deposite payload %s", err)
 		return
 	}
 
 	if payload.UserID == 0 || payload.Reference == "" {
-		log.Error("Invalid [deposite] payload: missing required fields")
+		log.Error("Invalid deposite payload: missing required fields")
 		return
 	}
 
@@ -111,7 +147,7 @@ func (s *Ws) deposite(socketId string, msg *comm.WSMessage) {
 		return
 	}
 
-	log.Infof("Published [payment.service] message for user %d to topic %s", payload.UserID, topic)
+	log.Infof("Published payment.service message for user %d to topic %s", payload.UserID, topic)
 }
 
 func (s *Ws) withdrawal(socketId string, msg *comm.WSMessage) {
@@ -128,7 +164,7 @@ func (s *Ws) withdrawal(socketId string, msg *comm.WSMessage) {
 	}
 
 	if payload.UserID == 0 || payload.Amount <= 0 || payload.AccountType == "" || payload.AccountNo == "" || payload.Name == "" {
-		log.Error("Invalid [withdrawal] payload: missing required fields")
+		log.Error("Invalid withdrawal payload: missing required fields")
 		return
 	}
 
@@ -139,7 +175,7 @@ func (s *Ws) withdrawal(socketId string, msg *comm.WSMessage) {
 		"telebirr":  true,
 	}
 	if !validAccountTypes[payload.AccountType] {
-		log.Error("Invalid [withdrawal] payload: invalid account type")
+		log.Error("Invalid withdrawal payload: invalid account type")
 		return
 	}
 
@@ -156,7 +192,7 @@ func (s *Ws) withdrawal(socketId string, msg *comm.WSMessage) {
 		log.Errorf("Failed to publish to NATS topic %s: %v", topic, err)
 		return
 	}
-	log.Infof("Published [payment.service] withdrawal message for user %d (amount: %.2f, account: %s) to topic %s",
+	log.Infof("Published payment.service withdrawal message for user %d (amount: %.2f, account: %s) to topic %s",
 		payload.UserID, payload.Amount, payload.AccountType, topic)
 }
 
@@ -168,12 +204,12 @@ func (s *Ws) claimBingo(socketId string, msg *comm.WSMessage) {
 	}
 
 	if err := json.Unmarshal(msg.Data, &payload); err != nil {
-		log.Errorf("Error: invalid selectCard payload %s", err)
+		log.Errorf("Error: invalid claimBingo payload %s", err)
 		return
 	}
 
 	if payload.UserID == 0 || payload.GameID == 0 {
-		log.Error("Invalid [claimBingo] payload: missing required fields")
+		log.Error("Invalid claimBingo payload: missing required fields")
 		return
 	}
 
@@ -193,7 +229,7 @@ func (s *Ws) claimBingo(socketId string, msg *comm.WSMessage) {
 		return
 	}
 
-	log.Infof("Published [claimBingo] message for user %d to topic %s", payload.UserID, topic)
+	log.Infof("Published claimBingo message for user %d to topic %s", payload.UserID, topic)
 }
 
 func (s *Ws) selectCard(socketId string, msg *comm.WSMessage) {
@@ -210,7 +246,7 @@ func (s *Ws) selectCard(socketId string, msg *comm.WSMessage) {
 	}
 
 	if payload.UserId == 0 {
-		log.Error("Invalid [selectCard] payload: missing required user fields")
+		log.Error("Invalid selectCard payload: missing required user fields")
 		return
 	}
 
@@ -230,7 +266,7 @@ func (s *Ws) selectCard(socketId string, msg *comm.WSMessage) {
 		return
 	}
 
-	log.Infof("Published [selectCard] message for user %d to topic %s", payload.UserId, topic)
+	log.Infof("Published selectCard message for user %d to topic %s", payload.UserId, topic)
 }
 
 func (s *Ws) getWaitGame(socketId string, msg *comm.WSMessage) {
@@ -241,23 +277,26 @@ func (s *Ws) getWaitGame(socketId string, msg *comm.WSMessage) {
 	}
 
 	if err := json.Unmarshal(msg.Data, &payload); err != nil {
-		log.Errorf("Error: invalid_get_wait_game payload %s", err)
+		log.Errorf("Error: invalid getWaitGame payload %s", err)
 		return
 	}
 
 	if msg.Type != "get-wait-game" {
-		log.Errorf("Invalid message type for get_wait_game handler: %s", msg.Type)
+		log.Errorf("Invalid message type for getWaitGame handler: %s", msg.Type)
 		return
 	}
 
 	if payload.UserId == 0 {
-		log.Error("Invalid get_wait_game payload: missing required user fields")
+		log.Error("Invalid getWaitGame payload: missing required user fields")
 		return
 	}
 
 	// for socket grouping per game id
 	s.Broker.Mu.Lock()
-	s.Broker.GameRooms[payload.Gtype] = append(s.Broker.GameRooms[payload.Gtype], socketId)
+	// Check if socket is already in this game type room to prevent duplicates
+	if !contains(s.Broker.GameRooms[payload.Gtype], socketId) {
+		s.Broker.GameRooms[payload.Gtype] = append(s.Broker.GameRooms[payload.Gtype], socketId)
+	}
 	s.Broker.Mu.Unlock()
 
 	so := s.Broker.GameRooms
@@ -283,7 +322,7 @@ func (s *Ws) getWaitGame(socketId string, msg *comm.WSMessage) {
 		return
 	}
 
-	log.Infof("Published get_wait_game message for user %d to topic %s", payload.UserId, topic)
+	log.Infof("Published getWaitGame message for user %d to topic %s", payload.UserId, topic)
 }
 
 func (s *Ws) checkActiveGame(socketId string, msg *comm.WSMessage) {
@@ -292,30 +331,38 @@ func (s *Ws) checkActiveGame(socketId string, msg *comm.WSMessage) {
 	}
 
 	if err := json.Unmarshal(msg.Data, &payload); err != nil {
-		log.Errorf("Error: invalid_get_wait_game payload %s", err)
+		log.Errorf("Error: invalid checkActiveGame payload %s", err)
 		return
 	}
 
 	if msg.Type != "check-active-game" {
-		log.Errorf("Invalid message type for get_wait_game handler: %s", msg.Type)
+		log.Errorf("Invalid message type for checkActiveGame handler: %s", msg.Type)
 		return
 	}
 
 	if payload.UserId == 0 {
-		log.Error("Invalid get_wait_game payload: missing required user fields")
+		log.Error("Invalid checkActiveGame payload: missing required user fields")
 		return
 	}
 
 	// for socket grouping per game type
 	staticGameTypes := []int{10, 20, 40, 50, 100, 200}
-	if !contains(s.Broker.GameRooms[staticGameTypes[0]], socketId) { // to check if previously this socket to any of the gametype rooms
-		s.Broker.Mu.Lock()
+
+	// Check if socket is already in any game room to prevent duplicates
+	alreadyInRooms := false
+	s.Broker.Mu.Lock()
+	for _, gtype := range staticGameTypes {
+		if contains(s.Broker.GameRooms[gtype], socketId) {
+			alreadyInRooms = true
+			break
+		}
+	}
+	if !alreadyInRooms {
 		for _, gtype := range staticGameTypes {
 			s.Broker.GameRooms[gtype] = append(s.Broker.GameRooms[gtype], socketId)
 		}
-
-		s.Broker.Mu.Unlock()
 	}
+	s.Broker.Mu.Unlock()
 
 	// Update message with socket ID
 	msg.SocketId = socketId
@@ -334,7 +381,7 @@ func (s *Ws) checkActiveGame(socketId string, msg *comm.WSMessage) {
 		return
 	}
 
-	log.Infof("Published get_active_game message for user %d to topic %s", payload.UserId, topic)
+	log.Infof("Published checkActiveGame message for user %d to topic %s", payload.UserId, topic)
 }
 
 func (s *Ws) handleInit(socketId string, msg *comm.WSMessage) {
@@ -348,7 +395,7 @@ func (s *Ws) handleInit(socketId string, msg *comm.WSMessage) {
 	}
 
 	if err := json.Unmarshal(msg.Data, &payload); err != nil {
-		log.Errorf("Error: invalid_init_data Malformed init payload %s", err)
+		log.Errorf("Error: invalid handleInit payload %s", err)
 		return
 	}
 
@@ -386,6 +433,7 @@ func (s *Ws) handleInit(socketId string, msg *comm.WSMessage) {
 
 func (s *Ws) StoreConnection(socketId string, conn *websocket.Conn) {
 	s.connMap.Store(socketId, conn)
+	log.Infof("Stored connection for socket: %s", socketId)
 }
 
 func (s *Ws) GetConnection(socketId string) (*websocket.Conn, bool) {

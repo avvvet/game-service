@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -109,19 +110,60 @@ func handlePaymentService(nc *natscli.Nats, pool *pgxpool.Pool, msg *nats.Msg) {
 	}
 }
 
+// Add this helper function
+func extractReferenceNumber(text string) (string, error) {
+	// Look for the CBE URL pattern with ?id= parameter
+	pattern := `https://apps\.cbe\.com\.et:100/\?id=(FT[A-Z0-9]+)`
+	re := regexp.MustCompile(pattern)
+
+	matches := re.FindStringSubmatch(text)
+	if len(matches) < 2 {
+		return "", fmt.Errorf("CBE confirmation URL with reference number not found")
+	}
+
+	referenceNumber := matches[1]
+
+	// Additional validation: ensure it starts with FT and has reasonable length
+	if !strings.HasPrefix(referenceNumber, "FT") || len(referenceNumber) < 10 {
+		return "", fmt.Errorf("invalid reference number format")
+	}
+
+	return referenceNumber, nil
+}
+
 func handleDeposit(nc *natscli.Nats, pool *pgxpool.Pool, ws comm.WSMessage) {
 	// Decode request
 	var req comm.PaymentRequest
 	if err := json.Unmarshal(ws.Data, &req); err != nil {
 		log.Errorf("invalid PaymentRequest: %v", err)
+		res := comm.DepositeRes{
+			Status:    "invalid-request",
+			Message:   "Invalid request format",
+			Timestamp: time.Now().Unix(),
+		}
+		PublishDepositeRes(nc, res, ws.SocketId)
 		return
 	}
 
-	// Fetch and parse PaymentInfo from PDF
-	info, err := fetchPaymentInfo(strings.ToUpper(req.Reference))
+	// Extract reference number from the text
+	referenceNumber, err := extractReferenceNumber(req.Reference)
+	if err != nil {
+		log.Errorf("reference extraction error: %v", err)
+		res := comm.DepositeRes{
+			Status:    "invalid-reference",
+			Message:   "Please include the complete CBE confirmation message with the transaction URL",
+			Timestamp: time.Now().Unix(),
+		}
+		PublishDepositeRes(nc, res, ws.SocketId)
+		return
+	}
+
+	// Fetch and parse PaymentInfo from PDF using extracted reference
+	info, err := fetchPaymentInfo(strings.ToUpper(referenceNumber))
 	if err != nil {
 		res := comm.DepositeRes{
-			Status:    "error",
+			Status:    "invalid-reference",
+			Message:   "Reference number not found or invalid",
 			Timestamp: time.Now().Unix(),
 		}
 		PublishDepositeRes(nc, res, ws.SocketId)
@@ -129,11 +171,11 @@ func handleDeposit(nc *natscli.Nats, pool *pgxpool.Pool, ws comm.WSMessage) {
 	}
 
 	// Validate receiver
-	const expectedReceiver = "SABA TSEGAYE BEKELE" //"AWET TSEGAZEAB GEBREAMLAK"
+	expectedReceiver := os.Getenv("DEPOSIT_CBE_ACCOUNT")
 	if info.Receiver != expectedReceiver {
-
 		res := comm.DepositeRes{
 			Status:    "invalid-receiver",
+			Message:   "Payment was not made to the correct account",
 			Timestamp: time.Now().Unix(),
 		}
 		PublishDepositeRes(nc, res, ws.SocketId)
@@ -143,11 +185,13 @@ func handleDeposit(nc *natscli.Nats, pool *pgxpool.Pool, ws comm.WSMessage) {
 	// DB transaction: insert into balances table
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
+
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		log.Errorf("begin tx: %v", err)
 		res := comm.DepositeRes{
-			Status:    "error",
+			Status:    "server-error",
+			Message:   "Database connection failed. Please try again",
 			Timestamp: time.Now().Unix(),
 		}
 		PublishDepositeRes(nc, res, ws.SocketId)
@@ -155,41 +199,43 @@ func handleDeposit(nc *natscli.Nats, pool *pgxpool.Pool, ws comm.WSMessage) {
 	}
 	defer tx.Rollback(ctx)
 
-	// Idempotency: ensure tref not in balances
+	// Idempotency: ensure tref not in balances (use extracted reference)
 	var exists bool
 	err = tx.QueryRow(ctx,
 		`SELECT EXISTS(SELECT 1 FROM balances WHERE tref = $1)`,
-		req.Reference,
+		referenceNumber,
 	).Scan(&exists)
 	if err != nil {
 		log.Errorf("idempotency check error: %v", err)
-
 		res := comm.DepositeRes{
-			Status:    "error",
+			Status:    "server-error",
+			Message:   "Database error occurred. Please try again",
 			Timestamp: time.Now().Unix(),
 		}
 		PublishDepositeRes(nc, res, ws.SocketId)
 		return
 	}
+
 	if exists {
 		res := comm.DepositeRes{
 			Status:    "duplicate",
+			Message:   "This reference number has already been used",
 			Timestamp: time.Now().Unix(),
 		}
 		PublishDepositeRes(nc, res, ws.SocketId)
 		return
 	}
 
-	// Insert new balance record
+	// Insert new balance record (use extracted reference)
 	_, err = tx.Exec(ctx, `
 		INSERT INTO balances (user_id, ttype, dr, cr, tref, status)
 		VALUES ($1, 'deposit', $2, 0, $3, 'verified')
-	`, req.UserID, info.TotalAmount, req.Reference)
+	`, req.UserID, info.TotalAmount, referenceNumber)
 	if err != nil {
 		log.Errorf("insert balance error: %v", err)
-
 		res := comm.DepositeRes{
-			Status:    "error",
+			Status:    "server-error",
+			Message:   "Failed to process deposit. Please try again",
 			Timestamp: time.Now().Unix(),
 		}
 		PublishDepositeRes(nc, res, ws.SocketId)
@@ -199,18 +245,19 @@ func handleDeposit(nc *natscli.Nats, pool *pgxpool.Pool, ws comm.WSMessage) {
 	// Commit transaction
 	if err := tx.Commit(ctx); err != nil {
 		log.Errorf("commit tx: %v", err)
-
 		res := comm.DepositeRes{
-			Status:    "error",
+			Status:    "server-error",
+			Message:   "Failed to complete deposit. Please try again",
 			Timestamp: time.Now().Unix(),
 		}
 		PublishDepositeRes(nc, res, ws.SocketId)
 		return
 	}
 
-	// Build and publish win data
+	// Success response
 	res := comm.DepositeRes{
 		Status:    "success",
+		Message:   "Deposit processed successfully",
 		Timestamp: time.Now().Unix(),
 	}
 	PublishDepositeRes(nc, res, ws.SocketId)
