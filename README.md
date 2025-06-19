@@ -2,6 +2,10 @@
 # Install golang-migrate with PostgreSQL Tags:
 go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@latest
 
+cd ~/go/bin
+
+cp migrate /usr/local/bin/
+
 # Create the Migration Files
 
 ```
