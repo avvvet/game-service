@@ -3,6 +3,7 @@ package ws
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/avvvet/bingo-services/internal/comm"
@@ -74,6 +75,10 @@ func (s *Ws) SocketMessage(socketId string, message *comm.WSMessage) {
 		s.claimBingo(socketId, message)
 	case "deposite":
 		s.deposite(socketId, message)
+	case "transfer":
+		s.transfer(socketId, message)
+	case "search-user":
+		s.searchUser(socketId, message)
 	case "withdrawal":
 		s.withdrawal(socketId, message)
 	default:
@@ -194,6 +199,98 @@ func (s *Ws) withdrawal(socketId string, msg *comm.WSMessage) {
 	}
 	log.Infof("Published payment.service withdrawal message for user %d (amount: %.2f, account: %s) to topic %s",
 		payload.UserID, payload.Amount, payload.AccountType, topic)
+}
+
+// Transfer socket handler
+func (s *Ws) transfer(socketId string, msg *comm.WSMessage) {
+	var payload struct {
+		FromUserID string  `json:"fromUserId"`
+		ToUserID   string  `json:"toUserId"`
+		Amount     float64 `json:"amount"`
+	}
+
+	if err := json.Unmarshal(msg.Data, &payload); err != nil {
+		log.Errorf("Error: invalid transfer payload %s", err)
+		return
+	}
+
+	if payload.FromUserID == "" || payload.ToUserID == "" || payload.Amount <= 0 {
+		log.Error("Invalid transfer payload: missing required fields")
+		return
+	}
+
+	// Prevent self-transfer
+	if payload.FromUserID == payload.ToUserID {
+		log.Error("Invalid transfer payload: cannot transfer to self")
+		return
+	}
+
+	// Set minimum transfer amount (optional)
+	if payload.Amount < 1.0 {
+		log.Error("Invalid transfer payload: amount too small")
+		return
+	}
+
+	msg.SocketId = socketId
+
+	// Marshal message for NATS
+	bytes, err := json.Marshal(msg)
+	if err != nil {
+		log.Errorf("Failed to marshal WSMessage for NATS: %v", err)
+		return
+	}
+
+	// Publish and it will be picked by pay service
+	topic := "payment.service"
+	if err := s.Broker.Publish(topic, bytes); err != nil {
+		log.Errorf("Failed to publish to NATS topic %s: %v", topic, err)
+		return
+	}
+
+	log.Infof("Published payment.service transfer message from user %s to user %s (amount: %.2f) to topic %s",
+		payload.FromUserID, payload.ToUserID, payload.Amount, topic)
+}
+
+func (s *Ws) searchUser(socketId string, msg *comm.WSMessage) {
+	var payload struct {
+		Query string `json:"query"` // Single field for name or ID
+	}
+
+	if err := json.Unmarshal(msg.Data, &payload); err != nil {
+		log.Errorf("Error: invalid search user payload %s", err)
+		return
+	}
+
+	if payload.Query == "" {
+		log.Error("Invalid search user payload: missing search query")
+		return
+	}
+
+	// Basic validation
+	query := strings.TrimSpace(payload.Query)
+	if len(query) < 1 {
+		log.Error("Invalid search user payload: query too short")
+		return
+	}
+
+	msg.SocketId = socketId
+
+	// Marshal message for NATS
+	bytes, err := json.Marshal(msg)
+	if err != nil {
+		log.Errorf("Failed to marshal WSMessage for NATS: %v", err)
+		return
+	}
+
+	// Publish and it will be picked by pay service
+	topic := "payment.service"
+	if err := s.Broker.Publish(topic, bytes); err != nil {
+		log.Errorf("Failed to publish to NATS topic %s: %v", topic, err)
+		return
+	}
+
+	log.Infof("Published payment.service search-user message for query '%s' to topic %s",
+		query, topic)
 }
 
 func (s *Ws) claimBingo(socketId string, msg *comm.WSMessage) {

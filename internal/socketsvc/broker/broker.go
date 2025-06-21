@@ -74,7 +74,7 @@ func (b *Broker) handleMessages(msgNats *nats.Msg) {
 		b.sendMessage(message)
 	case "player-cancel-card-response", "insufficient-balance-response", "check-active-game-response", "bingo-claim-rejected":
 		b.sendMessage(message)
-	case "deposite-res", "withdrawal-res":
+	case "deposite-res", "withdrawal-res", "transfer-res", "user-search-res":
 		b.sendMessage(message)
 	case "balance-resp":
 		b.sendMessage(message)

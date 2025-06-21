@@ -93,3 +93,37 @@ type WithdrawalRes struct {
 	Name         string          `json:"name,omitempty"`
 	Timestamp    int64           `json:"timestamp"` // Unix timestamp in milliseconds
 }
+
+// TransferRequest represents the transfer request payload from socket
+type TransferRequest struct {
+	FromUserID string  `json:"fromUserId"`
+	ToUserID   string  `json:"toUserId"`
+	Amount     float64 `json:"amount"`
+}
+
+// TransferRes represents the transfer response
+type TransferRes struct {
+	Status        string  `json:"status"`
+	Message       string  `json:"message"`
+	TransactionID string  `json:"transactionId,omitempty"`
+	Amount        float64 `json:"amount,omitempty"`
+	Timestamp     int64   `json:"timestamp"`
+}
+
+// UserSearchRequest - unified search with single query field
+type UserSearchRequest struct {
+	Query string `json:"query"` // Can be name or user ID
+}
+
+// UserSearchRes represents the user search response
+type UserSearchRes struct {
+	Status    string      `json:"status"`
+	User      *SearchUser `json:"user,omitempty"`
+	Timestamp int64       `json:"timestamp"`
+}
+
+// SearchUser represents a user in search results
+type SearchUser struct {
+	UserID string `json:"userId"`
+	Name   string `json:"name"`
+}

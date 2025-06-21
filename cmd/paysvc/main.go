@@ -18,6 +18,7 @@ import (
 	"github.com/avvvet/bingo-services/internal/comm"
 	"github.com/avvvet/bingo-services/internal/gamesvc/db"
 	natscli "github.com/avvvet/bingo-services/internal/nats"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/ledongthuc/pdf"
 	"github.com/nats-io/nats.go"
@@ -105,6 +106,10 @@ func handlePaymentService(nc *natscli.Nats, pool *pgxpool.Pool, msg *nats.Msg) {
 		handleDeposit(nc, pool, ws)
 	case "withdrawal":
 		handleWithdrawal(nc, pool, ws)
+	case "transfer":
+		handleTransfer(nc, pool, ws)
+	case "search-user":
+		handleUserSearch(nc, pool, ws)
 	default:
 		log.Warnf("unknown message type: %s", ws.Type)
 	}
@@ -306,6 +311,325 @@ func handleWithdrawal(nc *natscli.Nats, pool *pgxpool.Pool, ws comm.WSMessage) {
 	publishWithdrawalRes(nc, res, ws.SocketId)
 }
 
+func handleTransfer(nc *natscli.Nats, pool *pgxpool.Pool, ws comm.WSMessage) {
+	// Decode request
+	var req comm.TransferRequest
+	if err := json.Unmarshal(ws.Data, &req); err != nil {
+		log.Errorf("invalid TransferRequest: %v", err)
+		res := comm.TransferRes{
+			Status:    "invalid-request",
+			Message:   "Invalid request format",
+			Timestamp: time.Now().Unix(),
+		}
+		PublishTransferRes(nc, res, ws.SocketId)
+		return
+	}
+
+	// Convert string user IDs to int64
+	fromUserID, err := strconv.ParseInt(req.FromUserID, 10, 64)
+	if err != nil {
+		log.Errorf("invalid FromUserID: %v", err)
+		res := comm.TransferRes{
+			Status:    "invalid-request",
+			Message:   "Invalid sender user ID",
+			Timestamp: time.Now().Unix(),
+		}
+		PublishTransferRes(nc, res, ws.SocketId)
+		return
+	}
+
+	toUserID, err := strconv.ParseInt(req.ToUserID, 10, 64)
+	if err != nil {
+		log.Errorf("invalid ToUserID: %v", err)
+		res := comm.TransferRes{
+			Status:    "invalid-request",
+			Message:   "Invalid recipient user ID",
+			Timestamp: time.Now().Unix(),
+		}
+		PublishTransferRes(nc, res, ws.SocketId)
+		return
+	}
+
+	// Validate request
+	if fromUserID == 0 || toUserID == 0 || req.Amount <= 0 {
+		res := comm.TransferRes{
+			Status:    "invalid-request",
+			Message:   "Missing required fields or invalid amount",
+			Timestamp: time.Now().Unix(),
+		}
+		PublishTransferRes(nc, res, ws.SocketId)
+		return
+	}
+
+	// Prevent self-transfer
+	if fromUserID == toUserID {
+		res := comm.TransferRes{
+			Status:    "self-transfer",
+			Message:   "Cannot transfer funds to yourself",
+			Timestamp: time.Now().Unix(),
+		}
+		PublishTransferRes(nc, res, ws.SocketId)
+		return
+	}
+
+	// DB transaction: transfer funds between users
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		log.Errorf("begin tx: %v", err)
+		res := comm.TransferRes{
+			Status:    "server-error",
+			Message:   "Database connection failed. Please try again",
+			Timestamp: time.Now().Unix(),
+		}
+		PublishTransferRes(nc, res, ws.SocketId)
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	// Check if recipient user exists
+	var recipientExists bool
+	err = tx.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM users WHERE user_id = $1)`,
+		toUserID,
+	).Scan(&recipientExists)
+	if err != nil {
+		log.Errorf("recipient check error: %v", err)
+		res := comm.TransferRes{
+			Status:    "server-error",
+			Message:   "Database error occurred. Please try again",
+			Timestamp: time.Now().Unix(),
+		}
+		PublishTransferRes(nc, res, ws.SocketId)
+		return
+	}
+
+	if !recipientExists {
+		res := comm.TransferRes{
+			Status:    "user-not-found",
+			Message:   "Recipient user not found",
+			Timestamp: time.Now().Unix(),
+		}
+		PublishTransferRes(nc, res, ws.SocketId)
+		return
+	}
+
+	// Calculate sender's current balance using same logic as withdrawal
+	rows, err := tx.Query(ctx, `
+		SELECT dr, cr
+		FROM balances
+		WHERE user_id = $1 AND status = 'verified'
+		FOR UPDATE
+	`, fromUserID)
+	if err != nil {
+		log.Errorf("lock balance records: %v", err)
+		res := comm.TransferRes{
+			Status:    "server-error",
+			Message:   "Failed to check balance. Please try again",
+			Timestamp: time.Now().Unix(),
+		}
+		PublishTransferRes(nc, res, ws.SocketId)
+		return
+	}
+	defer rows.Close()
+
+	var totalDr, totalCr decimal.Decimal
+	for rows.Next() {
+		var dr, cr decimal.Decimal
+		if err := rows.Scan(&dr, &cr); err != nil {
+			log.Errorf("scan balance row: %v", err)
+			res := comm.TransferRes{
+				Status:    "server-error",
+				Message:   "Failed to process transfer. Please try again",
+				Timestamp: time.Now().Unix(),
+			}
+			PublishTransferRes(nc, res, ws.SocketId)
+			return
+		}
+		totalDr = totalDr.Add(dr)
+		totalCr = totalCr.Add(cr)
+	}
+
+	senderBalance := totalDr.Sub(totalCr)
+	transferAmount := decimal.NewFromFloat(req.Amount)
+
+	// Check if sender has sufficient balance
+	if senderBalance.LessThan(transferAmount) {
+		res := comm.TransferRes{
+			Status:    "insufficient-balance",
+			Message:   "Insufficient balance for this transfer",
+			Timestamp: time.Now().Unix(),
+		}
+		PublishTransferRes(nc, res, ws.SocketId)
+		return
+	}
+
+	// Generate unique transaction reference and individual record references
+	transactionID := uuid.New().String()
+	baseRef := fmt.Sprintf("TXF-%s", transactionID[:8])
+	senderRef := fmt.Sprintf("%s-OUT", baseRef)  // Unique reference for sender
+	receiverRef := fmt.Sprintf("%s-IN", baseRef) // Unique reference for receiver
+
+	// Insert CR (Credit/Debit from sender) record - sender loses money
+	_, err = tx.Exec(ctx, `
+		INSERT INTO balances (user_id, ttype, dr, cr, tref, status, created_at)
+		VALUES ($1, 'transfer_out', 0, $2, $3, 'verified', NOW())
+	`, fromUserID, transferAmount, senderRef)
+	if err != nil {
+		log.Errorf("insert sender record error: %v", err)
+		res := comm.TransferRes{
+			Status:    "server-error",
+			Message:   "Failed to process transfer. Please try again",
+			Timestamp: time.Now().Unix(),
+		}
+		PublishTransferRes(nc, res, ws.SocketId)
+		return
+	}
+
+	// Insert DR (Debit/Credit to receiver) record - receiver gains money
+	_, err = tx.Exec(ctx, `
+		INSERT INTO balances (user_id, ttype, dr, cr, tref, status, created_at)
+		VALUES ($1, 'transfer_in', $2, 0, $3, 'verified', NOW())
+	`, toUserID, transferAmount, receiverRef)
+	if err != nil {
+		log.Errorf("insert receiver record error: %v", err)
+		res := comm.TransferRes{
+			Status:    "server-error",
+			Message:   "Failed to process transfer. Please try again",
+			Timestamp: time.Now().Unix(),
+		}
+		PublishTransferRes(nc, res, ws.SocketId)
+		return
+	}
+
+	// Commit transaction
+	if err := tx.Commit(ctx); err != nil {
+		log.Errorf("commit tx: %v", err)
+		res := comm.TransferRes{
+			Status:    "server-error",
+			Message:   "Failed to complete transfer. Please try again",
+			Timestamp: time.Now().Unix(),
+		}
+		PublishTransferRes(nc, res, ws.SocketId)
+		return
+	}
+
+	// Success response
+	res := comm.TransferRes{
+		Status:        "success",
+		Message:       "Transfer completed successfully",
+		TransactionID: transactionID,
+		Amount:        req.Amount,
+		Timestamp:     time.Now().Unix(),
+	}
+	PublishTransferRes(nc, res, ws.SocketId)
+}
+
+// Unified search method - searches both name and ID fields simultaneously
+func handleUserSearch(nc *natscli.Nats, pool *pgxpool.Pool, ws comm.WSMessage) {
+	// Decode request
+	var req comm.UserSearchRequest
+	if err := json.Unmarshal(ws.Data, &req); err != nil {
+		log.Errorf("invalid UserSearchRequest: %v", err)
+		res := comm.UserSearchRes{
+			Status: "invalid-request",
+		}
+		PublishUserSearchRes(nc, res, ws.SocketId)
+		return
+	}
+
+	// Validate request
+	if req.Query == "" {
+		res := comm.UserSearchRes{
+			Status:    "invalid-request",
+			Timestamp: time.Now().Unix(),
+		}
+		PublishUserSearchRes(nc, res, ws.SocketId)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	query := strings.TrimSpace(req.Query)
+	log.Infof("Searching for user with query: %s", query)
+
+	// Single query that searches both user_id and name fields
+	var user comm.SearchUser
+	err := pool.QueryRow(ctx, `
+		SELECT user_id, name 
+		FROM users 
+		WHERE status = 'active' 
+		AND (
+			-- Exact user_id match (if query is numeric)
+			(user_id::text = $1)
+			OR 
+			-- Name search (case insensitive, partial match)
+			(LOWER(name) LIKE LOWER($2))
+		)
+		ORDER BY 
+			-- Prioritize exact user_id match
+			CASE WHEN user_id::text = $1 THEN 1 ELSE 2 END,
+			-- Then prioritize exact name match
+			CASE WHEN LOWER(name) = LOWER($3) THEN 1 ELSE 2 END,
+			-- Finally order by name
+			name
+		LIMIT 1
+	`, query, "%"+query+"%", query).Scan(&user.UserID, &user.Name)
+
+	if err != nil {
+		if strings.Contains(err.Error(), "no rows in result set") {
+			res := comm.UserSearchRes{
+				Status:    "not-found",
+				Timestamp: time.Now().Unix(),
+			}
+			PublishUserSearchRes(nc, res, ws.SocketId)
+			return
+		}
+
+		log.Errorf("user search error: %v", err)
+		res := comm.UserSearchRes{
+			Status:    "server-error",
+			Timestamp: time.Now().Unix(),
+		}
+		PublishUserSearchRes(nc, res, ws.SocketId)
+		return
+	}
+
+	// Success response
+	res := comm.UserSearchRes{
+		Status:    "success",
+		User:      &user,
+		Timestamp: time.Now().Unix(),
+	}
+	PublishUserSearchRes(nc, res, ws.SocketId)
+}
+
+// PublishUserSearchRes publishes user search response to NATS
+func PublishUserSearchRes(n *natscli.Nats, p comm.UserSearchRes, socketId string) {
+	data, err := json.Marshal(p)
+	if err != nil {
+		log.Errorf("unable to marshal UserSearchRes: %v", err)
+		return
+	}
+
+	msg := &comm.WSMessage{
+		Type:     "user-search-res",
+		Data:     data,
+		SocketId: socketId,
+	}
+
+	payload, err := json.Marshal(msg)
+	if err != nil {
+		log.Errorf("Error marshaling WSMessage: %s", err)
+		return
+	}
+
+	n.Conn.Publish("game.service", payload)
+}
+
 func PublishDepositeRes(n *natscli.Nats, p comm.DepositeRes, socketId string) {
 	data, err := json.Marshal(p)
 	if err != nil {
@@ -342,6 +666,29 @@ func publishWithdrawalRes(n *natscli.Nats, p comm.WithdrawalRes, socketId string
 	payload, err := json.Marshal(msg)
 	if err != nil {
 		log.Errorf("Error marshaling WSMessage: %v", err)
+		return
+	}
+
+	n.Conn.Publish("game.service", payload)
+}
+
+// PublishTransferRes publishes transfer response to NATS
+func PublishTransferRes(n *natscli.Nats, p comm.TransferRes, socketId string) {
+	data, err := json.Marshal(p)
+	if err != nil {
+		log.Errorf("unable to marshal TransferRes: %v", err)
+		return
+	}
+
+	msg := &comm.WSMessage{
+		Type:     "transfer-res",
+		Data:     data,
+		SocketId: socketId,
+	}
+
+	payload, err := json.Marshal(msg)
+	if err != nil {
+		log.Errorf("Error marshaling WSMessage: %s", err)
 		return
 	}
 
