@@ -561,7 +561,7 @@ func handleUserSearch(nc *natscli.Nats, pool *pgxpool.Pool, ws comm.WSMessage) {
 	err := pool.QueryRow(ctx, `
 		SELECT user_id, name 
 		FROM users 
-		WHERE status = 'active' 
+		WHERE status = 'ACTIVE' 
 		AND (
 			-- Exact user_id match (if query is numeric)
 			(user_id::text = $1)
