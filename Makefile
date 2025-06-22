@@ -7,6 +7,7 @@ BINARY_CTLSVC    = ctlsvc
 BINARY_CALLERSVC = callersvc
 BINARY_CLAIMSVC  = claimsvc
 BINARY_PAYSVC    = paysvc
+BINARY_ROBOSVC    = robosvc
 
 # Default: build all services
 all: build
@@ -20,6 +21,7 @@ build:
 	GOARCH=amd64 GOOS=linux go build -o ./bin/$(BINARY_CALLERSVC) ./cmd/callersvc/main.go
 	GOARCH=amd64 GOOS=linux go build -o ./bin/$(BINARY_CLAIMSVC)  ./cmd/claimsvc/main.go
 	GOARCH=amd64 GOOS=linux go build -o ./bin/$(BINARY_PAYSVC)    ./cmd/paysvc/main.go
+	GOARCH=amd64 GOOS=linux go build -o ./bin/$(BINARY_ROBOSVC)    ./cmd/robosvc/main.go
 	@echo "Build complete."
 
 # Run individual services
@@ -47,6 +49,10 @@ paysvc: build
 	@echo "Running $(BINARY_PAYSVC)..."
 	@./bin/$(BINARY_PAYSVC)
 
+robosvc: build
+	@echo "Running $(BINARY_ROBOSVC)..."
+	@./bin/$(BINARY_ROBOSVC)
+
 # Directory to hold pid files
 PIDDIR := .pids
 
@@ -59,6 +65,7 @@ run-all: build
 		$(BINARY_CTLSVC) \
 		$(BINARY_CALLERSVC) \
 		$(BINARY_CLAIMSVC) \
+		$(BINARY_ROBOSVC) \
 		$(BINARY_PAYSVC); do \
 	  ./bin/$$svc & \
 	  echo $$! > $(PIDDIR)/$$svc.pid; \

@@ -154,7 +154,7 @@ func processWaitingGames(ctx context.Context, pool *pgxpool.Pool) ([]gameInfo, e
 		}
 
 		// only start if more than one player joined
-		if count > 1 {
+		if count > 15 {
 			if _, err := tx.Exec(ctx, `
                 UPDATE games
                 SET status = 'started', updated_at = now()
