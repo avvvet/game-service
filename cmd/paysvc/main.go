@@ -825,6 +825,107 @@ func createWithdrawalRequest(ctx context.Context, pool *pgxpool.Pool, userID int
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("rows error: %w", err)
 	}
+
+	balance := totalDr.Sub(totalCr)
+
+	// Check if user has sufficient balance
+	if balance.LessThan(amount) {
+		return nil, fmt.Errorf("insufficient balance: have %s, need %s", balance.String(), amount.String())
+	}
+
+	// Check if user has any pending withdrawal requests
+	var pendingCount int
+	err = tx.QueryRow(ctx, `
+		SELECT COUNT(*)
+		FROM withdrawal_requests
+		WHERE user_id = $1 AND status = 'pending'
+	`, userID).Scan(&pendingCount)
+	if err != nil {
+		return nil, fmt.Errorf("check pending requests: %w", err)
+	}
+	if pendingCount > 0 {
+		return nil, fmt.Errorf("user already has a pending withdrawal request")
+	}
+
+	// Insert withdrawal request
+	var withdrawalID int64
+	err = tx.QueryRow(ctx, `
+		INSERT INTO withdrawal_requests (
+			user_id,
+			amount,
+			balance_snapshot,
+			account_type,
+			account_no,
+			name,
+			status,
+			created_at,
+			updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, 'pending', now(), now())
+		RETURNING id
+	`, userID, amount, balance, accountType, accountNo, name).Scan(&withdrawalID)
+	if err != nil {
+		return nil, fmt.Errorf("insert withdrawal request: %w", err)
+	}
+
+	// Generate reference number for the withdrawal
+	referenceNumber := fmt.Sprintf("WD%d", withdrawalID)
+
+	// Insert new balance record for withdrawal (DR=0, CR=amount for withdrawal)
+	_, err = tx.Exec(ctx, `
+		INSERT INTO balances (user_id, ttype, dr, cr, tref, status)
+		VALUES ($1, 'withdrawal', 0, $2, $3, 'verified')
+	`, userID, amount, referenceNumber)
+	if err != nil {
+		return nil, fmt.Errorf("insert balance record: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit tx: %w", err)
+	}
+
+	return &WithdrawalRequest{
+		ID:              withdrawalID,
+		UserID:          userID,
+		Amount:          amount,
+		BalanceSnapshot: balance,
+		AccountType:     accountType,
+		AccountNo:       accountNo,
+		Name:            name,
+		Status:          "pending",
+	}, nil
+}
+
+func createWithdrawalRequestOld(ctx context.Context, pool *pgxpool.Pool, userID int64, amount decimal.Decimal, accountType, accountNo, name string) (*WithdrawalRequest, error) {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Lock balance records first, then calculate totals
+	rows, err := tx.Query(ctx, `
+		SELECT dr, cr
+		FROM balances
+		WHERE user_id = $1 AND status = 'verified'
+		FOR UPDATE
+	`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("lock balance records: %w", err)
+	}
+	defer rows.Close()
+
+	var totalDr, totalCr decimal.Decimal
+	for rows.Next() {
+		var dr, cr decimal.Decimal
+		if err := rows.Scan(&dr, &cr); err != nil {
+			return nil, fmt.Errorf("scan balance row: %w", err)
+		}
+		totalDr = totalDr.Add(dr)
+		totalCr = totalCr.Add(cr)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows error: %w", err)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("get user balance: %w", err)
 	}
