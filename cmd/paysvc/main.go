@@ -18,6 +18,7 @@ import (
 	"github.com/avvvet/bingo-services/internal/comm"
 	"github.com/avvvet/bingo-services/internal/gamesvc/db"
 	natscli "github.com/avvvet/bingo-services/internal/nats"
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/ledongthuc/pdf"
@@ -46,7 +47,85 @@ var (
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		},
 	}
+
+	// Telegram bot instance
+	telegramBot *tgbotapi.BotAPI
 )
+
+// TelegramNotifier handles sending notifications to multiple users
+type TelegramNotifier struct {
+	bot     *tgbotapi.BotAPI
+	chatIDs []int64
+}
+
+// NewTelegramNotifier creates a new Telegram notifier
+func NewTelegramNotifier(botToken string, chatIDs []int64) (*TelegramNotifier, error) {
+	bot, err := tgbotapi.NewBotAPI(botToken)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create bot: %v", err)
+	}
+
+	return &TelegramNotifier{
+		bot:     bot,
+		chatIDs: chatIDs,
+	}, nil
+}
+
+// SendNotification sends a message to all configured chat IDs
+func (tn *TelegramNotifier) SendNotification(message string) {
+	if tn == nil || tn.bot == nil {
+		return
+	}
+
+	for _, chatID := range tn.chatIDs {
+		msg := tgbotapi.NewMessage(chatID, message)
+		msg.ParseMode = "Markdown"
+
+		go func(cid int64) {
+			if _, err := tn.bot.Send(tgbotapi.NewMessage(cid, message)); err != nil {
+				log.Errorf("Failed to send telegram message to chat %d: %v", cid, err)
+			}
+		}(chatID)
+	}
+}
+
+// Initialize Telegram notifier
+func initTelegramNotifier() *TelegramNotifier {
+	botToken := os.Getenv("TELEGRAM_BOT_TOKEN")
+	if botToken == "" {
+		log.Warn("TELEGRAM_BOT_TOKEN not set, notifications disabled")
+		return nil
+	}
+
+	// Parse chat IDs from environment variables
+	var chatIDs []int64
+	for i := 1; i <= 3; i++ {
+		chatIDStr := os.Getenv(fmt.Sprintf("TELEGRAM_CHAT_ID_%d", i))
+		if chatIDStr != "" {
+			if chatID, err := strconv.ParseInt(chatIDStr, 10, 64); err == nil {
+				chatIDs = append(chatIDs, chatID)
+			} else {
+				log.Errorf("Invalid TELEGRAM_CHAT_ID_%d format: %v", i, err)
+			}
+		}
+	}
+
+	if len(chatIDs) == 0 {
+		log.Warn("No valid telegram chat IDs found, notifications disabled")
+		return nil
+	}
+
+	notifier, err := NewTelegramNotifier(botToken, chatIDs)
+	if err != nil {
+		log.Errorf("Failed to initialize Telegram notifier: %v", err)
+		return nil
+	}
+
+	log.Infof("Telegram notifier initialized with %d chat IDs", len(chatIDs))
+	return notifier
+}
+
+var telegramNotifier *TelegramNotifier
 
 type PaymentInfo struct {
 	Receiver    string
@@ -66,6 +145,9 @@ type WithdrawalRequest struct {
 }
 
 func main() {
+	// Initialize Telegram notifier
+	telegramNotifier = initTelegramNotifier()
+
 	// pg connection
 	dbpool, err := db.Connect()
 	if err != nil {
@@ -259,6 +341,24 @@ func handleDeposit(nc *natscli.Nats, pool *pgxpool.Pool, ws comm.WSMessage) {
 		return
 	}
 
+	// Send Telegram notification for successful deposit
+	if telegramNotifier != nil {
+		message := fmt.Sprintf(
+			"💰 *DEPOSIT SUCCESS*\n\n"+
+				"👤 *User ID:* %d\n"+
+				"💵 *Amount:* %.2f ETB\n"+
+				"🔗 *Reference:* %s\n"+
+				"📅 *Date:* %s\n"+
+				"⏰ *Time:* %s",
+			req.UserID,
+			info.TotalAmount,
+			referenceNumber,
+			info.PaymentDate,
+			time.Now().Format("15:04:05"),
+		)
+		telegramNotifier.SendNotification(message)
+	}
+
 	// Success response
 	res := comm.DepositeRes{
 		Status:    "success",
@@ -296,6 +396,30 @@ func handleWithdrawal(nc *natscli.Nats, pool *pgxpool.Pool, ws comm.WSMessage) {
 		}
 		publishWithdrawalRes(nc, comm.WithdrawalRes{Status: status, Timestamp: time.Now().UnixMilli()}, ws.SocketId)
 		return
+	}
+
+	// Send Telegram notification for successful withdrawal
+	if telegramNotifier != nil {
+		message := fmt.Sprintf(
+			"💸 *WITHDRAWAL REQUEST*\n\n"+
+				"👤 *User ID:* %d\n"+
+				"💵 *Amount:* %s ETB\n"+
+				"🏦 *Account Type:* %s\n"+
+				"📋 *Account No:* %s\n"+
+				"👨‍💼 *Name:* %s\n"+
+				"🆔 *Withdrawal ID:* %d\n"+
+				"📊 *Balance Snapshot:* %s ETB\n"+
+				"⏰ *Time:* %s",
+			withdrawalReq.UserID,
+			withdrawalReq.Amount.String(),
+			withdrawalReq.AccountType,
+			withdrawalReq.AccountNo,
+			withdrawalReq.Name,
+			withdrawalReq.ID,
+			withdrawalReq.BalanceSnapshot.String(),
+			time.Now().Format("2006-01-02 15:04:05"),
+		)
+		telegramNotifier.SendNotification(message)
 	}
 
 	// Build and publish response
@@ -514,6 +638,28 @@ func handleTransfer(nc *natscli.Nats, pool *pgxpool.Pool, ws comm.WSMessage) {
 		}
 		PublishTransferRes(nc, res, ws.SocketId)
 		return
+	}
+
+	// Send Telegram notification for successful transfer
+	if telegramNotifier != nil {
+		message := fmt.Sprintf(
+			"🔄 *TRANSFER SUCCESS*\n\n"+
+				"📤 *From User:* %d\n"+
+				"📥 *To User:* %d\n"+
+				"💵 *Amount:* %.2f ETB\n"+
+				"🆔 *Transaction ID:* %s\n"+
+				"🔗 *Sender Ref:* %s\n"+
+				"🔗 *Receiver Ref:* %s\n"+
+				"⏰ *Time:* %s",
+			fromUserID,
+			toUserID,
+			req.Amount,
+			transactionID,
+			senderRef,
+			receiverRef,
+			time.Now().Format("2006-01-02 15:04:05"),
+		)
+		telegramNotifier.SendNotification(message)
 	}
 
 	// Success response
@@ -877,99 +1023,6 @@ func createWithdrawalRequest(ctx context.Context, pool *pgxpool.Pool, userID int
 	`, userID, amount, referenceNumber)
 	if err != nil {
 		return nil, fmt.Errorf("insert balance record: %w", err)
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit tx: %w", err)
-	}
-
-	return &WithdrawalRequest{
-		ID:              withdrawalID,
-		UserID:          userID,
-		Amount:          amount,
-		BalanceSnapshot: balance,
-		AccountType:     accountType,
-		AccountNo:       accountNo,
-		Name:            name,
-		Status:          "pending",
-	}, nil
-}
-
-func createWithdrawalRequestOld(ctx context.Context, pool *pgxpool.Pool, userID int64, amount decimal.Decimal, accountType, accountNo, name string) (*WithdrawalRequest, error) {
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("begin tx: %w", err)
-	}
-	defer tx.Rollback(ctx)
-
-	// Lock balance records first, then calculate totals
-	rows, err := tx.Query(ctx, `
-		SELECT dr, cr
-		FROM balances
-		WHERE user_id = $1 AND status = 'verified'
-		FOR UPDATE
-	`, userID)
-	if err != nil {
-		return nil, fmt.Errorf("lock balance records: %w", err)
-	}
-	defer rows.Close()
-
-	var totalDr, totalCr decimal.Decimal
-	for rows.Next() {
-		var dr, cr decimal.Decimal
-		if err := rows.Scan(&dr, &cr); err != nil {
-			return nil, fmt.Errorf("scan balance row: %w", err)
-		}
-		totalDr = totalDr.Add(dr)
-		totalCr = totalCr.Add(cr)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("rows error: %w", err)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("get user balance: %w", err)
-	}
-
-	balance := totalDr.Sub(totalCr)
-
-	// Check if user has sufficient balance
-	if balance.LessThan(amount) {
-		return nil, fmt.Errorf("insufficient balance: have %s, need %s", balance.String(), amount.String())
-	}
-
-	// Check if user has any pending withdrawal requests
-	var pendingCount int
-	err = tx.QueryRow(ctx, `
-		SELECT COUNT(*)
-		FROM withdrawal_requests
-		WHERE user_id = $1 AND status = 'pending'
-	`, userID).Scan(&pendingCount)
-	if err != nil {
-		return nil, fmt.Errorf("check pending requests: %w", err)
-	}
-
-	if pendingCount > 0 {
-		return nil, fmt.Errorf("user already has a pending withdrawal request")
-	}
-
-	// Insert withdrawal request
-	var withdrawalID int64
-	err = tx.QueryRow(ctx, `
-		INSERT INTO withdrawal_requests (
-			user_id,
-			amount,
-			balance_snapshot,
-			account_type,
-			account_no,
-			name,
-			status,
-			created_at,
-			updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, 'pending', now(), now())
-		RETURNING id
-	`, userID, amount, balance, accountType, accountNo, name).Scan(&withdrawalID)
-	if err != nil {
-		return nil, fmt.Errorf("insert withdrawal request: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {

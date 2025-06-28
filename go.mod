@@ -30,6 +30,7 @@ require (
 )
 
 require (
+	github.com/go-telegram-bot-api/telegram-bot-api/v5 v5.5.1
 	github.com/goccy/go-json v0.3.5 // indirect
 	github.com/golang/snappy v0.0.4 // indirect
 	github.com/jackc/pgx v3.6.2+incompatible
