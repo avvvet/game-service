@@ -454,10 +454,10 @@ func validateAndExtractTelebirrSMS(smsText string) (*TelebirrData, error) {
 	}
 
 	// Validate recipient against environment variables
-	expectedName := os.Getenv("TELEBIRR_RECIPIENT_NAME")
+	//expectedName := os.Getenv("TELEBIRR_RECIPIENT_NAME")
 	expectedPhone := os.Getenv("TELEBIRR_RECIPIENT_PHONE_PATTERN")
 
-	data.RecipientValid = (data.RecipientName == expectedName && data.RecipientPhone == expectedPhone)
+	data.RecipientValid = (data.RecipientPhone == expectedPhone)
 
 	if !data.RecipientValid {
 		return nil, fmt.Errorf("payment was not made to the correct Telebirr account")
