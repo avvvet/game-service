@@ -122,8 +122,9 @@ func (s *Ws) getBalance(socketId string, msg *comm.WSMessage) {
 
 func (s *Ws) deposite(socketId string, msg *comm.WSMessage) {
 	var payload struct {
-		UserID    int64  `json:"userId"`
-		Reference string `json:"referenceNumber"`
+		UserID        int64  `json:"userId"`
+		Reference     string `json:"referenceNumber"`
+		PaymentMethod string `json:"paymentMethod"`
 	}
 
 	if err := json.Unmarshal(msg.Data, &payload); err != nil {

@@ -58,6 +58,16 @@ type TelegramNotifier struct {
 	chatIDs []int64
 }
 
+// TelebirrData holds extracted information from Telebirr SMS
+type TelebirrData struct {
+	TransactionNumber string
+	Amount            float64
+	RecipientName     string
+	RecipientPhone    string
+	TransactionURL    string
+	RecipientValid    bool
+}
+
 // NewTelegramNotifier creates a new Telegram notifier
 func NewTelegramNotifier(botToken string, chatIDs []int64) (*TelegramNotifier, error) {
 	bot, err := tgbotapi.NewBotAPI(botToken)
@@ -219,6 +229,382 @@ func extractReferenceNumber(text string) (string, error) {
 }
 
 func handleDeposit(nc *natscli.Nats, pool *pgxpool.Pool, ws comm.WSMessage) {
+	// Decode request
+	var req comm.PaymentRequest
+	if err := json.Unmarshal(ws.Data, &req); err != nil {
+		log.Errorf("invalid PaymentRequest: %v", err)
+		res := comm.DepositeRes{
+			Status:    "invalid-request",
+			Message:   "Invalid request format",
+			Timestamp: time.Now().Unix(),
+		}
+		PublishDepositeRes(nc, res, ws.SocketId)
+		return
+	}
+
+	// Determine payment method (default to CBE for backward compatibility)
+	paymentMethod := req.PaymentMethod
+	if paymentMethod == "" {
+		paymentMethod = "cbe"
+	}
+
+	// Handle based on payment method
+	switch paymentMethod {
+	case "telebirr":
+		handleTelebirrDeposit(nc, pool, req, ws.SocketId)
+	case "cbe":
+		handleCBEDeposit(nc, pool, req, ws.SocketId)
+	default:
+		res := comm.DepositeRes{
+			Status:    "invalid-request",
+			Message:   "Unsupported payment method",
+			Timestamp: time.Now().Unix(),
+		}
+		PublishDepositeRes(nc, res, ws.SocketId)
+	}
+}
+
+func handleTelebirrDeposit(nc *natscli.Nats, pool *pgxpool.Pool, req comm.PaymentRequest, socketId string) {
+	// Validate Telebirr SMS format and extract details
+	telebirrData, err := validateAndExtractTelebirrSMS(req.Reference)
+	if err != nil {
+		log.Errorf("Telebirr SMS validation error: %v", err)
+		res := comm.DepositeRes{
+			Status:    "invalid-reference",
+			Message:   err.Error(),
+			Timestamp: time.Now().Unix(),
+		}
+		PublishDepositeRes(nc, res, socketId)
+		return
+	}
+
+	// DB transaction: insert pending Telebirr deposit
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		log.Errorf("begin tx: %v", err)
+		res := comm.DepositeRes{
+			Status:    "server-error",
+			Message:   "Database connection failed. Please try again",
+			Timestamp: time.Now().Unix(),
+		}
+		PublishDepositeRes(nc, res, socketId)
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	// Check for duplicate transaction number
+	var exists bool
+	err = tx.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM balances WHERE tref = $1)`,
+		telebirrData.TransactionNumber,
+	).Scan(&exists)
+	if err != nil {
+		log.Errorf("duplicate check error: %v", err)
+		res := comm.DepositeRes{
+			Status:    "server-error",
+			Message:   "Database error occurred. Please try again",
+			Timestamp: time.Now().Unix(),
+		}
+		PublishDepositeRes(nc, res, socketId)
+		return
+	}
+
+	if exists {
+		res := comm.DepositeRes{
+			Status:    "duplicate",
+			Message:   "This Telebirr transaction has already been submitted",
+			Timestamp: time.Now().Unix(),
+		}
+		PublishDepositeRes(nc, res, socketId)
+		return
+	}
+
+	// Insert pending Telebirr deposit record
+	_, err = tx.Exec(ctx, `
+		INSERT INTO balances (user_id, ttype, dr, cr, tref, status, created_at)
+		VALUES ($1, 'telebirr-deposit', 0, 0, $2, 'pending', NOW())
+	`, req.UserID, telebirrData.TransactionNumber)
+	if err != nil {
+		log.Errorf("insert pending deposit error: %v", err)
+		res := comm.DepositeRes{
+			Status:    "server-error",
+			Message:   "Failed to record deposit request. Please try again",
+			Timestamp: time.Now().Unix(),
+		}
+		PublishDepositeRes(nc, res, socketId)
+		return
+	}
+
+	// Commit transaction
+	if err := tx.Commit(ctx); err != nil {
+		log.Errorf("commit tx: %v", err)
+		res := comm.DepositeRes{
+			Status:    "server-error",
+			Message:   "Failed to complete request. Please try again",
+			Timestamp: time.Now().Unix(),
+		}
+		PublishDepositeRes(nc, res, socketId)
+		return
+	}
+
+	// Send Telegram notification for Telebirr deposit request
+	if telegramNotifier != nil {
+		recipientStatus := "✅ Verified"
+		if !telebirrData.RecipientValid {
+			recipientStatus = "❌ Invalid recipient"
+		}
+
+		message := fmt.Sprintf(
+			"📱 *TELEBIRR DEPOSIT REQUEST*\n\n"+
+				"👤 *User ID:* %d\n"+
+				"💵 *Amount:* %.2f ETB\n"+
+				"🔗 *Transaction:* %s\n"+
+				"👥 *Recipient:* %s\n"+
+				"📞 *Phone:* %s\n"+
+				"✅ *Validation:* %s\n"+
+				"📅 *Date:* %s\n"+
+				"⏰ *Time:* %s\n\n"+
+				"🔗 *Receipt:* %s\n\n"+
+				"⚠️ *PENDING MANUAL TRANSFER FROM WALLET*",
+			req.UserID,
+			telebirrData.Amount,
+			telebirrData.TransactionNumber,
+			telebirrData.RecipientName,
+			telebirrData.RecipientPhone,
+			recipientStatus,
+			time.Now().Format("2006-01-02"),
+			time.Now().Format("15:04:05"),
+			telebirrData.TransactionURL,
+		)
+		telegramNotifier.SendNotification(message)
+	}
+
+	// Return success response
+	res := comm.DepositeRes{
+		Status:    "success",
+		Message:   "Telebirr deposit request received and recorded. Your deposit will be processed within 24 hours after manual verification.",
+		Timestamp: time.Now().Unix(),
+	}
+	PublishDepositeRes(nc, res, socketId)
+}
+
+func validateAndExtractTelebirrSMS(smsText string) (*TelebirrData, error) {
+	// Check for required Telebirr SMS markers
+	requiredPhrases := []string{
+		"You have transferred ETB",
+		"transaction number is",
+		"Thank you for using telebirr",
+		"Ethio telecom",
+	}
+
+	for _, phrase := range requiredPhrases {
+		if !strings.Contains(smsText, phrase) {
+			return nil, fmt.Errorf("invalid Telebirr SMS format: missing '%s'", phrase)
+		}
+	}
+
+	data := &TelebirrData{}
+
+	// Extract transaction number using regex
+	transactionRegex := regexp.MustCompile(`transaction number is\s+([A-Z0-9]{10})`)
+	transactionMatch := transactionRegex.FindStringSubmatch(smsText)
+	if len(transactionMatch) < 2 {
+		return nil, fmt.Errorf("transaction number not found or invalid format")
+	}
+	data.TransactionNumber = transactionMatch[1]
+
+	// Extract amount
+	amountRegex := regexp.MustCompile(`You have transferred ETB\s+([\d,]+\.?\d*)`)
+	amountMatch := amountRegex.FindStringSubmatch(smsText)
+	if len(amountMatch) < 2 {
+		return nil, fmt.Errorf("transfer amount not found")
+	}
+
+	// Parse amount (remove commas if present)
+	amountStr := strings.ReplaceAll(amountMatch[1], ",", "")
+	amount, err := strconv.ParseFloat(amountStr, 64)
+	if err != nil {
+		return nil, fmt.Errorf("invalid amount format: %v", err)
+	}
+	data.Amount = amount
+
+	// Extract recipient name and phone
+	recipientRegex := regexp.MustCompile(`to\s+([^(]+)\s+\((\d{4}\*{4}\d{4})\)`)
+	recipientMatch := recipientRegex.FindStringSubmatch(smsText)
+	if len(recipientMatch) < 3 {
+		return nil, fmt.Errorf("recipient information not found")
+	}
+	data.RecipientName = strings.TrimSpace(recipientMatch[1])
+	data.RecipientPhone = recipientMatch[2]
+
+	// Extract and validate transaction URL
+	urlRegex := regexp.MustCompile(`https://transactioninfo\.ethiotelecom\.et/receipt/([A-Z0-9]{10})`)
+	urlMatch := urlRegex.FindStringSubmatch(smsText)
+	if len(urlMatch) < 2 {
+		return nil, fmt.Errorf("transaction URL not found or invalid")
+	}
+	data.TransactionURL = urlMatch[0]
+
+	// Verify transaction number in URL matches the extracted one
+	if urlMatch[1] != data.TransactionNumber {
+		return nil, fmt.Errorf("transaction number mismatch between SMS text and URL")
+	}
+
+	// Validate recipient against environment variables
+	expectedName := os.Getenv("TELEBIRR_RECIPIENT_NAME")
+	expectedPhone := os.Getenv("TELEBIRR_RECIPIENT_PHONE_PATTERN")
+
+	data.RecipientValid = (data.RecipientName == expectedName && data.RecipientPhone == expectedPhone)
+
+	if !data.RecipientValid {
+		return nil, fmt.Errorf("payment was not made to the correct Telebirr account")
+	}
+
+	return data, nil
+}
+
+func handleCBEDeposit(nc *natscli.Nats, pool *pgxpool.Pool, req comm.PaymentRequest, socketId string) {
+	// Extract reference number from the text
+	referenceNumber, err := extractReferenceNumber(req.Reference)
+	if err != nil {
+		log.Errorf("reference extraction error: %v", err)
+		res := comm.DepositeRes{
+			Status:    "invalid-reference",
+			Message:   "Please include the complete CBE confirmation message with the transaction URL",
+			Timestamp: time.Now().Unix(),
+		}
+		PublishDepositeRes(nc, res, socketId)
+		return
+	}
+
+	// Fetch and parse PaymentInfo from PDF using extracted reference
+	info, err := fetchPaymentInfo(strings.ToUpper(referenceNumber))
+	if err != nil {
+		res := comm.DepositeRes{
+			Status:    "invalid-reference",
+			Message:   "Reference number not found or invalid",
+			Timestamp: time.Now().Unix(),
+		}
+		PublishDepositeRes(nc, res, socketId)
+		return
+	}
+
+	// Validate receiver
+	expectedReceiver := os.Getenv("DEPOSIT_CBE_ACCOUNT")
+	if info.Receiver != expectedReceiver {
+		res := comm.DepositeRes{
+			Status:    "invalid-receiver",
+			Message:   "Payment was not made to the correct account",
+			Timestamp: time.Now().Unix(),
+		}
+		PublishDepositeRes(nc, res, socketId)
+		return
+	}
+
+	// DB transaction: insert into balances table
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		log.Errorf("begin tx: %v", err)
+		res := comm.DepositeRes{
+			Status:    "server-error",
+			Message:   "Database connection failed. Please try again",
+			Timestamp: time.Now().Unix(),
+		}
+		PublishDepositeRes(nc, res, socketId)
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	// Idempotency: ensure tref not in balances (use extracted reference)
+	var exists bool
+	err = tx.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM balances WHERE tref = $1)`,
+		referenceNumber,
+	).Scan(&exists)
+	if err != nil {
+		log.Errorf("idempotency check error: %v", err)
+		res := comm.DepositeRes{
+			Status:    "server-error",
+			Message:   "Database error occurred. Please try again",
+			Timestamp: time.Now().Unix(),
+		}
+		PublishDepositeRes(nc, res, socketId)
+		return
+	}
+
+	if exists {
+		res := comm.DepositeRes{
+			Status:    "duplicate",
+			Message:   "This reference number has already been used",
+			Timestamp: time.Now().Unix(),
+		}
+		PublishDepositeRes(nc, res, socketId)
+		return
+	}
+
+	// Insert new balance record (use extracted reference)
+	_, err = tx.Exec(ctx, `
+		INSERT INTO balances (user_id, ttype, dr, cr, tref, status)
+		VALUES ($1, 'deposit', $2, 0, $3, 'verified')
+	`, req.UserID, info.TotalAmount, referenceNumber)
+	if err != nil {
+		log.Errorf("insert balance error: %v", err)
+		res := comm.DepositeRes{
+			Status:    "server-error",
+			Message:   "Failed to process deposit. Please try again",
+			Timestamp: time.Now().Unix(),
+		}
+		PublishDepositeRes(nc, res, socketId)
+		return
+	}
+
+	// Commit transaction
+	if err := tx.Commit(ctx); err != nil {
+		log.Errorf("commit tx: %v", err)
+		res := comm.DepositeRes{
+			Status:    "server-error",
+			Message:   "Failed to complete deposit. Please try again",
+			Timestamp: time.Now().Unix(),
+		}
+		PublishDepositeRes(nc, res, socketId)
+		return
+	}
+
+	// Send Telegram notification for successful CBE deposit
+	if telegramNotifier != nil {
+		message := fmt.Sprintf(
+			"🏦 *CBE DEPOSIT SUCCESS*\n\n"+
+				"👤 *User ID:* %d\n"+
+				"💵 *Amount:* %.2f ETB\n"+
+				"🔗 *Reference:* %s\n"+
+				"📅 *Date:* %s\n"+
+				"⏰ *Time:* %s\n\n"+
+				"✅ *Automatically verified and credited*",
+			req.UserID,
+			info.TotalAmount,
+			referenceNumber,
+			info.PaymentDate,
+			time.Now().Format("15:04:05"),
+		)
+		telegramNotifier.SendNotification(message)
+	}
+
+	// Success response
+	res := comm.DepositeRes{
+		Status:    "success",
+		Message:   "CBE deposit processed successfully",
+		Timestamp: time.Now().Unix(),
+	}
+	PublishDepositeRes(nc, res, socketId)
+}
+
+func handleDepositOld(nc *natscli.Nats, pool *pgxpool.Pool, ws comm.WSMessage) {
 	// Decode request
 	var req comm.PaymentRequest
 	if err := json.Unmarshal(ws.Data, &req); err != nil {

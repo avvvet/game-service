@@ -72,8 +72,9 @@ type CallMessage struct {
 
 // PaymentRequest is the incoming event when a user submits a reference
 type PaymentRequest struct {
-	UserID    int64  `json:"userId"`
-	Reference string `json:"referenceNumber"`
+	UserID        int64  `json:"userId"`
+	Reference     string `json:"referenceNumber"`
+	PaymentMethod string `json:"paymentMethod"`
 }
 
 type WithdrawalRequest struct {
