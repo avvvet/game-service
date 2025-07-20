@@ -136,7 +136,7 @@ func handleClaim(n *natscli.Nats, pool *pgxpool.Pool, msg *nats.Msg) {
 	}
 
 	// 2) Fetch this player's card and validate Bingo
-	card, err := GetPlayerCard(ctx, pool, claim.GameID, claim.UserID)
+	card, cardSN, err := GetPlayerCard(ctx, pool, claim.GameID, claim.UserID)
 	if err != nil {
 		log.Errorf("GetPlayerCard error: %v", err)
 		return
@@ -231,6 +231,7 @@ func handleClaim(n *natscli.Nats, pool *pgxpool.Pool, msg *nats.Msg) {
 			Name:         name,
 			Avatar:       avatar,
 			Marks:        claim.Marks,
+			CardSN:       cardSN,
 			WinnerAmount: 0, // No winnings for single player game
 		}
 		PublishWin(n, winData, ws.SocketId)
@@ -322,6 +323,7 @@ func handleClaim(n *natscli.Nats, pool *pgxpool.Pool, msg *nats.Msg) {
 		Name:         name,
 		Avatar:       avatar,
 		Marks:        claim.Marks,
+		CardSN:       cardSN,
 		WinnerAmount: winnerDR, // Add the winner amount after house cut
 	}
 	PublishWin(n, winData, ws.SocketId)
@@ -350,7 +352,7 @@ func PublishWin(n *natscli.Nats, p comm.WinData, socketId string) {
 // GetPlayerCard retrieves a 25-number card for user via card_sn lookup
 // GetPlayerCard retrieves a 25-number bingo card for a user by parsing
 // the comma-separated `data` column in `cards`.
-func GetPlayerCard(ctx context.Context, pool *pgxpool.Pool, gameID int, userID int64) ([]int, error) {
+func GetPlayerCard(ctx context.Context, pool *pgxpool.Pool, gameID int, userID int64) ([]int, string, error) {
 	// 1) Lookup the assigned card_sn
 	var cardSN string
 	if err := pool.QueryRow(ctx,
@@ -361,7 +363,7 @@ func GetPlayerCard(ctx context.Context, pool *pgxpool.Pool, gameID int, userID i
           LIMIT 1`,
 		gameID, userID,
 	).Scan(&cardSN); err != nil {
-		return nil, fmt.Errorf("GetPlayerCard: could not find card_sn: %w", err)
+		return nil, "", fmt.Errorf("GetPlayerCard: could not find card_sn: %w", err)
 	}
 
 	// 2) Read the CSV-style `data` field
@@ -370,7 +372,7 @@ func GetPlayerCard(ctx context.Context, pool *pgxpool.Pool, gameID int, userID i
 		`SELECT data FROM cards WHERE card_sn=$1`,
 		cardSN,
 	).Scan(&dataStr); err != nil {
-		return nil, fmt.Errorf("GetPlayerCard: could not fetch card data: %w", err)
+		return nil, "", fmt.Errorf("GetPlayerCard: could not fetch card data: %w", err)
 	}
 
 	// 3) Split on commas, trim spaces, parse ints
@@ -380,16 +382,16 @@ func GetPlayerCard(ctx context.Context, pool *pgxpool.Pool, gameID int, userID i
 		p = strings.TrimSpace(p)
 		n, err := strconv.Atoi(p)
 		if err != nil {
-			return nil, fmt.Errorf("GetPlayerCard: invalid number %q: %w", p, err)
+			return nil, "", fmt.Errorf("GetPlayerCard: invalid number %q: %w", p, err)
 		}
 		nums = append(nums, n)
 	}
 
 	// 4) Sanity check
 	if len(nums) != 25 {
-		return nil, fmt.Errorf("GetPlayerCard: expected 25 numbers, got %d", len(nums))
+		return nil, "", fmt.Errorf("GetPlayerCard: expected 25 numbers, got %d", len(nums))
 	}
-	return nums, nil
+	return nums, cardSN, nil
 }
 
 // ValidateBingo checks for a win (row, column or diagonal) on a 5×5 bingo card.

@@ -39,9 +39,9 @@ var robotUserIDs = []int64{
 
 // Robot names - mix of first names only and first+last names
 var robotNames = []string{
-	"Abelo", "meron bekele", "dawit", "mulugeta", "ted",
-	"yonas", "liya", "Bereket Alemu", "Eden", "Samuel Yimer",
-	"rahel", "Daniel Negash", "Bethel", "Kidus Wolde", "Natan",
+	"Ephrem", "beki", "dawit", "mulugeta", "Selam",
+	"yonas", "Ruth", "Bereket Alemu", "Tesfaye", "Yimer",
+	"Desta", "Daniel", "Ephrem", "Kidus Wolde", "Natan",
 }
 
 // Game types to monitor (1-6)
@@ -278,13 +278,19 @@ func processRobotBingoCall(robotState *RobotGameState, call comm.CallMessage, nc
 
 // publishBingoClaim publishes a bingo claim using the claim service format
 func publishBingoClaim(nc *natscli.Nats, robotState *RobotGameState) {
-	// Create marks array with actual numbers from card where marked
 	marks := make([]int, 25)
 	for i := 0; i < 25; i++ {
+		// Current position in robot's card
+		robotRow := i / 5
+		robotCol := i % 5
+
+		// Transpose: robot's row becomes frontend's column, robot's col becomes frontend's row
+		frontendIdx := robotCol*5 + robotRow
+
 		if robotState.MarkedCells[i] {
-			marks[i] = robotState.CardNumbers[i]
+			marks[frontendIdx] = robotState.CardNumbers[i]
 		} else {
-			marks[i] = 0 // Not marked
+			marks[frontendIdx] = 0
 		}
 	}
 

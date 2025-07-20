@@ -41,6 +41,7 @@ type WinData struct {
 	Name         string  `json:"name"`
 	Avatar       string  `json:"avatar"`
 	Marks        []int   `json:"marks"` // winer bing card, it shows how it win
+	CardSN       string  `json:"card_sn"`
 	WinnerAmount float64 `json:"winner_amount"`
 }
 
